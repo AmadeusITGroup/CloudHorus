@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CloudHorus — Azure Cloud Architecture Guardian</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+  <!-- Font Awesome — bundled locally (no CDN / network dependency) -->
+  <link rel="stylesheet" href="fonts/fontawesome/all.min.css">
+  <!-- Inter & JetBrains Mono — bundled locally -->
+  <link rel="stylesheet" href="fonts/local-fonts.css">
+</head>
+<body>
+  <!-- Animated background particles -->
+  <canvas id="particles-canvas"></canvas>
+
+  <div id="app" class="app-container">
+    <!-- ─── HEADER ─── -->
+    <header class="app-header" id="app-header">
+      <div class="header-content">
+        <div class="logo-group">
+          <div class="logo-icon pulse-glow">
+            <img src="cloudhorus-logo.png" alt="CloudHorus">
+          </div>
+          <div class="logo-text">
+            <h1>CloudHorus <span class="version-badge" id="version-badge"></span></h1>
+            <span class="tagline">Azure Cloud Architecture Guardian</span>
+          </div>
+        </div>
+        <!-- Scrolling tips ticker -->
+        <div class="header-ticker" id="header-ticker">
+          <div class="ticker-track" id="ticker-track"></div>
+        </div>
+        <div class="header-actions">
+          <div class="status-chip" id="status-chip">
+            <span class="status-dot"></span>
+            <span class="status-text">Ready</span>
+          </div>
+          <button id="style-toggle" class="style-toggle" title="Switch style: Egyptian / Modern" onclick="toggleStyle()">
+            <i class="fas fa-ankh"></i>
+          </button>
+          <button id="theme-toggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">
+            <i class="fas fa-moon"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- ─── MAIN LAYOUT ─── -->
+    <main class="main-layout">
+      <!-- LEFT: Configuration Panel -->
+      <aside class="config-panel" id="config-panel">
+        <!-- Panel collapse toggle (visible inside panel header) -->
+        <div class="config-panel-header">
+          <span class="config-panel-title"><i class="fas fa-sliders-h"></i> Configuration</span>
+          <div class="config-panel-actions">
+            <button class="btn btn-icon btn-sm tour-btn" id="btn-tour" onclick="startTour()" title="Take a guided tour">
+              <i class="fas fa-route"></i>
+            </button>
+            <button class="btn btn-icon btn-sm config-panel-toggle" id="btn-collapse-panel"
+                    onclick="toggleConfigPanel()" title="Collapse panel">
+              <i class="fas fa-chevron-left"></i>
+            </button>
+          </div>
+        </div>
+        <!-- Mode Selector -->
+        <section class="panel-section mode-section animate-in">
+          <h2 class="section-title"><i class="fas fa-layer-group"></i> Mode</h2>
+          <div class="mode-cards">
+            <label class="mode-card active" id="mode-live" onclick="selectMode('live')">
+              <div class="mode-card-icon"><i class="fas fa-cloud"></i></div>
+              <div class="mode-card-body">
+                <strong>Live Azure</strong>
+                <span>Scan real resources</span>
+              </div>
+              <div class="mode-card-check"><i class="fas fa-check-circle"></i></div>
+            </label>
+            <label class="mode-card" id="mode-bicep" onclick="selectMode('bicep')">
+              <div class="mode-card-icon"><i class="fas fa-file-code"></i></div>
+              <div class="mode-card-body">
+                <strong>Bicep Templates</strong>
+                <span>Offline analysis</span>
+              </div>
+              <div class="mode-card-check"><i class="fas fa-check-circle"></i></div>
+            </label>
+          </div>
+        </section>
+
+        <!-- Authentication Section -->
+        <section class="panel-section auth-section animate-in" id="section-auth">
+          <h2 class="section-title"><i class="fas fa-shield-alt"></i> Authentication</h2>
+
+          <!-- Security Notice Banner -->
+          <div class="security-notice">
+            <div class="security-notice-icon"><i class="fas fa-lock"></i></div>
+            <div class="security-notice-body">
+              <strong>Read-Only Access Recommended</strong>
+              <p>CloudHorus only requires <em>read</em> permissions (Reader role) to visualize your Azure resources. For security best practices, assign the identity used here the <strong>Reader</strong> role at the appropriate scope. CloudHorus enforces a read-only network policy that blocks all write operations at the SDK level.</p>
+            </div>
+          </div>
+
+          <!-- Auth Method Selector -->
+          <div class="auth-method-cards">
+            <label class="auth-method-card active" id="auth-device-code" onclick="selectAuthMethod('device-code')">
+              <div class="auth-method-icon"><i class="fas fa-mobile-alt"></i></div>
+              <div class="auth-method-body">
+                <strong>Device Code</strong>
+                <span>Interactive browser login</span>
+              </div>
+              <div class="auth-method-check"><i class="fas fa-check-circle"></i></div>
+            </label>
+            <label class="auth-method-card" id="auth-service-principal" onclick="selectAuthMethod('service-principal')">
+              <div class="auth-method-icon"><i class="fas fa-robot"></i></div>
+              <div class="auth-method-body">
+                <strong>Service Principal</strong>
+                <span>Non-interactive (CI/CD)</span>
+              </div>
+              <div class="auth-method-check"><i class="fas fa-check-circle"></i></div>
+            </label>
+          </div>
+
+          <!-- Service Principal Credentials (hidden by default) -->
+          <div class="sp-credentials hidden" id="sp-credentials">
+            <div class="form-group">
+              <label class="form-label">Client (Application) ID <span class="required">*</span><span class="info-icon" data-tooltip="The Application (client) ID of the Service Principal (Azure AD App Registration). This is a GUID."><i class="fas fa-info-circle"></i></span></label>
+              <div class="input-wrapper">
+                <i class="fas fa-id-badge input-icon"></i>
+                <input type="text" id="input-sp-client-id" class="form-input" placeholder="00000000-0000-0000-0000-000000000000" spellcheck="false" autocomplete="off">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Tenant ID <span class="required">*</span><span class="info-icon" data-tooltip="The Azure Active Directory tenant ID. This is auto-populated if you have already entered a Tenant ID in the Azure Scope section."><i class="fas fa-info-circle"></i></span></label>
+              <div class="input-wrapper">
+                <i class="fas fa-building input-icon"></i>
+                <input type="text" id="input-sp-tenant-id" class="form-input" placeholder="00000000-0000-0000-0000-000000000000" spellcheck="false" autocomplete="off">
+              </div>
+            </div>
+
+            <!-- Client Secret Input -->
+            <div class="form-group" id="sp-secret-direct-group">
+              <label class="form-label">Client Secret <span class="required">*</span><span class="info-icon" data-tooltip="The client secret value. Passed securely as an environment variable to the subprocess."><i class="fas fa-info-circle"></i></span></label>
+              <div class="input-wrapper">
+                <i class="fas fa-key input-icon"></i>
+                <input type="password" id="input-sp-secret" class="form-input" placeholder="Enter client secret" spellcheck="false" autocomplete="new-password">
+                <button class="btn btn-icon btn-sm input-action-btn" onclick="toggleSecretVisibility()" title="Show/hide secret">
+                  <i class="fas fa-eye" id="icon-secret-toggle"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- Validate SP Button -->
+            <button class="btn btn-accent btn-sm" id="btn-validate-sp" onclick="validateSP()" style="margin-top:8px;width:100%">
+              <i class="fas fa-check-double"></i> Validate Credentials
+            </button>
+            <div class="sp-validation-result hidden" id="sp-validation-result"></div>
+
+            <!-- OS-Aware Env Var Helper -->
+            <details class="env-var-helper" id="env-var-helper">
+              <summary><i class="fas fa-terminal"></i> Set up environment variables (CLI alternative)</summary>
+              <div class="env-var-helper-body">
+                <p class="hint-text">If you prefer running CloudHorus from the command line with a Service Principal, set these environment variables in your shell first:</p>
+                <div class="env-var-tabs">
+                  <button class="env-tab active" onclick="selectEnvTab('linux')" id="env-tab-linux">Linux / macOS</button>
+                  <button class="env-tab" onclick="selectEnvTab('windows')" id="env-tab-windows">Windows (CMD)</button>
+                  <button class="env-tab" onclick="selectEnvTab('powershell')" id="env-tab-powershell">PowerShell</button>
+                </div>
+                <div class="env-var-code" id="env-var-code">
+                  <pre id="env-var-pre"></pre>
+                </div>
+                <button class="btn btn-icon btn-sm" onclick="copyEnvVars()" title="Copy to clipboard" style="margin-top:6px">
+                  <i class="fas fa-copy"></i> Copy
+                </button>
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <!-- Live Mode: Azure Scope -->
+        <section class="panel-section azure-scope animate-in" id="section-azure-scope">
+          <h2 class="section-title"><i class="fas fa-key"></i> Azure Scope</h2>
+
+          <div class="form-group">
+            <label class="form-label">Tenant IDs <span class="hint">(Enter or paste to add)</span><span class="info-icon" data-tooltip="Azure Active Directory Tenant IDs (GUIDs). Each tenant represents an Azure AD directory. If you operate across multiple tenants, add each one."><i class="fas fa-info-circle"></i></span></label>
+            <div class="tag-input-wrapper" onclick="focusTagInput(this)">
+              <i class="fas fa-building input-icon"></i>
+              <div class="tag-chips" id="tags-tenants"></div>
+              <input type="text" class="tag-text-input" id="tag-entry-tenants"
+                     placeholder="Paste or type a tenant ID, press Enter"
+                     spellcheck="false"
+                     onkeydown="handleTagKey(event, 'tenants')"
+                     onpaste="handleTagPaste(event, 'tenants')">
+              <input type="hidden" id="input-tenants">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Subscription IDs <span class="hint">(Enter or paste to add)</span><span class="info-icon" data-tooltip="Azure Subscription IDs (GUIDs). Each subscription is a billing and access boundary containing resource groups. Add all subscriptions you want to visualize."><i class="fas fa-info-circle"></i></span></label>
+            <div class="tag-input-wrapper" onclick="focusTagInput(this)">
+              <i class="fas fa-id-card input-icon"></i>
+              <div class="tag-chips" id="tags-subscriptions"></div>
+              <input type="text" class="tag-text-input" id="tag-entry-subscriptions"
+                     placeholder="Paste or type a subscription ID, press Enter"
+                     spellcheck="false"
+                     onkeydown="handleTagKey(event, 'subscriptions')"
+                     onpaste="handleTagPaste(event, 'subscriptions')">
+              <input type="hidden" id="input-subscriptions">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Resource Groups <span class="hint">(Enter or paste to add)</span><span class="info-icon" data-tooltip="Azure Resource Group names. These are the logical containers holding your resources (VMs, VNets, storage, etc.). Only resources inside these groups will be scanned."><i class="fas fa-info-circle"></i></span></label>
+            <div class="tag-input-wrapper" onclick="focusTagInput(this)">
+              <i class="fas fa-cubes input-icon"></i>
+              <div class="tag-chips" id="tags-resourcegroups"></div>
+              <input type="text" class="tag-text-input" id="tag-entry-resourcegroups"
+                     placeholder="Paste or type a resource group name, press Enter"
+                     spellcheck="false"
+                     onkeydown="handleTagKey(event, 'resourcegroups')"
+                     onpaste="handleTagPaste(event, 'resourcegroups')">
+              <input type="hidden" id="input-resourcegroups">
+            </div>
+          </div>
+
+          <label class="toggle-row">
+            <span class="toggle-label"><i class="fas fa-search-plus"></i> Discover Related RGs (all)<span class="info-icon" data-tooltip="Toggle discovery for ALL resource groups at once. You can also click the search icon on each individual RG chip to enable/disable discovery per RG."><i class="fas fa-info-circle"></i></span></span>
+            <input type="checkbox" id="chk-discover-rgs" class="toggle-input" onchange="toggleAllRgDiscovery()">
+            <span class="toggle-slider"></span>
+          </label>
+        </section>
+
+        <!-- Bicep Mode: File Selection -->
+        <section class="panel-section bicep-files animate-in hidden" id="section-bicep-files">
+          <h2 class="section-title"><i class="fas fa-file-code"></i> Template Files</h2>
+
+          <div class="file-drop-zone" id="drop-bicep" ondrop="handleDrop(event,'bicep')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+            <i class="fas fa-cloud-upload-alt"></i>
+            <p>Drop Bicep files here or <button class="link-btn" onclick="pickBicepFiles()">browse</button></p>
+            <div class="file-list" id="file-list-bicep"></div>
+          </div>
+
+          <div class="file-drop-zone" id="drop-params" ondrop="handleDrop(event,'params')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" style="margin-top:12px">
+            <i class="fas fa-cog"></i>
+            <p>Drop Parameter files here or <button class="link-btn" onclick="pickParamFiles()">browse</button></p>
+            <div class="file-list" id="file-list-params"></div>
+          </div>
+
+          <!-- Per-subscription controls for Bicep mode (populated after param files are parsed) -->
+          <div id="bicep-per-sub-options" class="per-sub-container hidden" style="margin-top:16px">
+            <h3 class="subsection-title"><i class="fas fa-sliders-h"></i> Per-Subscription Settings</h3>
+            <p class="hint-text">Derived from <code>_cloudHorus</code> metadata in parameter files.</p>
+            <div id="bicep-per-sub-grid"></div>
+          </div>
+        </section>
+
+        <!-- Layout Settings -->
+        <section class="panel-section animate-in" id="section-layout">
+          <h2 class="section-title collapsible" onclick="toggleSection(this)">
+            <i class="fas fa-drafting-compass"></i> Layout
+            <i class="fas fa-chevron-down section-chevron"></i>
+          </h2>
+          <div class="section-body">
+            <div class="form-row">
+              <div class="form-group compact">
+                <label class="form-label">Edge Direction<span class="info-icon" data-tooltip="Controls the main flow direction of the graph. TB (Top→Bottom) is default and works well for hierarchical views. Use LR (Left→Right) when you have many peer resources per tier to reduce vertical scrolling."><i class="fas fa-info-circle"></i></span></label>
+                <div class="select-wrapper">
+                  <select id="sel-edge-direction" class="form-select">
+                    <option value="TB" selected>Top → Bottom</option>
+                    <option value="LR">Left → Right</option>
+                    <option value="BT">Bottom → Top</option>
+                    <option value="RL">Right → Left</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-group compact">
+                <label class="form-label">Tenant Direction<span class="info-icon" data-tooltip="Controls how multiple tenants are laid out relative to each other. LR (Left→Right) places tenants side-by-side. Use TB (Top→Bottom) if you prefer vertical tenant stacking."><i class="fas fa-info-circle"></i></span></label>
+                <div class="select-wrapper">
+                  <select id="sel-tenant-direction" class="form-select">
+                    <option value="LR" selected>Left → Right</option>
+                    <option value="TB">Top → Bottom</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group compact">
+                <label class="form-label">Max Subnets / Line<span class="info-icon" data-tooltip="Maximum number of subnets displayed per row inside a VNet. Lower values reduce horizontal scroll; higher values compress the VNet diagram. Default: 4."><i class="fas fa-info-circle"></i></span></label>
+                <div class="stepper">
+                  <button class="stepper-btn" onclick="stepValue('input-max-subnet',-1)"><i class="fas fa-minus"></i></button>
+                  <input type="number" id="input-max-subnet" class="stepper-input" value="4" min="1" max="20">
+                  <button class="stepper-btn" onclick="stepValue('input-max-subnet',1)"><i class="fas fa-plus"></i></button>
+                </div>
+              </div>
+              <div class="form-group compact">
+                <label class="form-label">Resource Edge Length<span class="info-icon" data-tooltip="Controls the spacing between connected resources. Increase to 2–3 if edges overlap in dense areas around hub resources. Default: 1."><i class="fas fa-info-circle"></i></span></label>
+                <div class="stepper">
+                  <button class="stepper-btn" onclick="stepValue('input-res-edge-len',-1)"><i class="fas fa-minus"></i></button>
+                  <input type="number" id="input-res-edge-len" class="stepper-input" value="1" min="1" max="10">
+                  <button class="stepper-btn" onclick="stepValue('input-res-edge-len',1)"><i class="fas fa-plus"></i></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Optimization Settings -->
+        <section class="panel-section animate-in" id="section-optimizations">
+          <h2 class="section-title collapsible" onclick="toggleSection(this)">
+            <i class="fas fa-bolt"></i> Optimizations
+            <i class="fas fa-chevron-down section-chevron"></i>
+          </h2>
+          <div class="section-body">
+            <label class="toggle-row">
+              <span class="toggle-label">Private DNS Zones Optimization<span class="info-icon" data-tooltip="When enabled, aggregates Private DNS Zones per VNet into a compact view instead of showing individual zone-to-VNet links. Disable for detailed DNS troubleshooting."><i class="fas fa-info-circle"></i></span></span>
+              <input type="checkbox" id="chk-dns-opt" class="toggle-input" checked>
+              <span class="toggle-slider"></span>
+            </label>
+
+            <label class="toggle-row">
+              <span class="toggle-label">Rank Debug<span class="info-icon" data-tooltip="Shows hidden internal ranking elements used by Graphviz for layout. Enable this to debug layout issues or understand why nodes are positioned in a certain way."><i class="fas fa-info-circle"></i></span></span>
+              <input type="checkbox" id="chk-rank-debug" class="toggle-input">
+              <span class="toggle-slider"></span>
+            </label>
+
+            <label class="toggle-row">
+              <span class="toggle-label">Export DrawIO<span class="info-icon" data-tooltip="When enabled, generates a .drawio file alongside the PNG output. This allows you to import and further edit the diagram in draw.io / diagrams.net."><i class="fas fa-info-circle"></i></span></span>
+              <input type="checkbox" id="chk-export-drawio" class="toggle-input">
+              <span class="toggle-slider"></span>
+            </label>
+
+            <!-- Per-subscription arrays -->
+            <div id="per-sub-options" class="per-sub-container hidden">
+              <h3 class="subsection-title"><i class="fas fa-sliders-h"></i> Per-Subscription Settings</h3>
+              <p class="hint-text">One toggle per subscription entered above.</p>
+              <div id="per-sub-grid"></div>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <!-- Expand button (shown when panel is collapsed) -->
+      <button class="config-expand-btn hidden" id="btn-expand-panel"
+              onclick="toggleConfigPanel()" title="Expand configuration panel">
+        <i class="fas fa-chevron-right"></i>
+        <span class="expand-label">Config</span>
+      </button>
+
+      <!-- RESIZE HANDLE (VS Code-style drag splitter) -->
+      <div class="panel-splitter" id="panel-splitter" title="Drag to resize, double-click to reset">
+        <div class="splitter-grip"></div>
+      </div>
+
+      <!-- RIGHT: Output & Visualization Panel -->
+      <div class="output-panel" id="output-panel">
+        <!-- Command Preview -->
+        <section class="panel-section preview-section animate-in">
+          <h2 class="section-title"><i class="fas fa-terminal"></i> Command Preview</h2>
+          <div class="command-preview" id="command-preview">
+            <code>python3 src/main.py ...</code>
+          </div>
+          <div class="preview-actions">
+            <button class="btn btn-icon" title="Copy command" onclick="copyCommand()">
+              <i class="fas fa-copy"></i>
+            </button>
+            <button class="btn btn-icon" title="Refresh preview" onclick="refreshPreview()">
+              <i class="fas fa-sync-alt"></i>
+            </button>
+          </div>
+        </section>
+
+        <!-- Action Buttons -->
+        <div class="action-bar">
+          <button class="btn btn-primary btn-lg generate-btn" id="btn-generate" onclick="generate()">
+            <i class="fas fa-feather-alt"></i>
+            <span>Invoke the Guardian</span>
+          </button>
+          <button class="btn btn-danger btn-lg hidden" id="btn-stop" onclick="stopGeneration()">
+            <i class="fas fa-stop"></i>
+            <span>Stop</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-view" onclick="viewResult()" disabled>
+            <i class="fas fa-image"></i>
+            <span>View Result</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-drawio" onclick="openDrawIO()" disabled style="display:none">
+            <i class="fas fa-project-diagram"></i>
+            <span>Open DrawIO</span>
+          </button>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-container hidden" id="progress-container">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-text" id="progress-text">Initializing...</div>
+        </div>
+
+        <!-- Console Output -->
+        <section class="panel-section console-section animate-in" id="console-section">
+          <div class="console-header">
+            <h2 class="section-title"><i class="fas fa-stream"></i> Console</h2>
+            <div class="console-actions">
+              <button class="btn btn-icon btn-sm" title="Clear" onclick="clearConsole()">
+                <i class="fas fa-trash-alt"></i>
+              </button>
+              <button class="btn btn-icon btn-sm" title="Scroll to bottom" onclick="scrollConsoleBottom()">
+                <i class="fas fa-angle-double-down"></i>
+              </button>
+              <button class="btn btn-icon btn-sm" id="btn-toggle-console" title="Minimize console" onclick="toggleOutputSection('console')">
+                <i class="fas fa-chevron-up"></i>
+              </button>
+            </div>
+          </div>
+          <div class="console-output" id="console-output">
+            <div class="console-line info">
+              <span class="console-prefix">[CloudHorus]</span> 🦅 The Guardian awaits. Configure your parameters and invoke.
+            </div>
+          </div>
+        </section>
+
+        <!-- Horizontal Splitter between Console and Viewer -->
+        <div class="h-splitter hidden" id="h-splitter" title="Drag to resize console / viewer">
+          <div class="h-splitter-grip"></div>
+        </div>
+
+        <!-- Image Viewer (initially hidden) -->
+        <section class="panel-section viewer-section hidden" id="viewer-section">
+          <div class="viewer-header">
+            <h2 class="section-title"><i class="fas fa-image"></i> Architecture Diagram</h2>
+            <div class="viewer-actions">
+              <button class="btn btn-icon btn-sm" id="btn-toggle-viewer" title="Maximize viewer" onclick="toggleOutputSection('viewer')">
+                <i class="fas fa-expand-alt"></i>
+              </button>
+              <button class="btn btn-icon btn-sm" onclick="toggleFullscreen()" title="Fullscreen" id="btn-fullscreen"><i class="fas fa-expand-arrows-alt"></i></button>
+              <button class="btn btn-icon btn-sm" onclick="zoomIn()" title="Zoom in"><i class="fas fa-search-plus"></i></button>
+              <button class="btn btn-icon btn-sm" onclick="zoomOut()" title="Zoom out"><i class="fas fa-search-minus"></i></button>
+              <button class="btn btn-icon btn-sm" onclick="zoomReset()" title="Fit"><i class="fas fa-expand"></i></button>
+              <button class="btn btn-icon btn-sm" onclick="openExternal()" title="Open in viewer"><i class="fas fa-external-link-alt"></i></button>
+            </div>
+          </div>
+          <div class="viewer-canvas" id="viewer-canvas">
+            <img id="viewer-img" src="" alt="Architecture Diagram" draggable="false">
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <!-- ─── AUTH MODAL ─── -->
+    <div class="modal-backdrop hidden" id="auth-modal">
+      <div class="modal animate-modal">
+        <div class="modal-header">
+          <div class="modal-icon pulse-glow"><i class="fas fa-shield-alt"></i></div>
+          <h2>Azure Authentication Required</h2>
+          <button class="modal-close" onclick="closeAuthModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="modal-body">
+          <div class="auth-step">
+            <div class="step-number">1</div>
+            <div class="step-content">
+              <p>Open this URL in your web browser:</p>
+              <div class="auth-value url-value" id="auth-url">https://microsoft.com/devicelogin</div>
+              <button class="btn btn-primary btn-sm" onclick="copyAuthUrl()">
+                <i class="fas fa-copy"></i> Copy URL
+              </button>
+            </div>
+          </div>
+          <div class="auth-step">
+            <div class="step-number">2</div>
+            <div class="step-content">
+              <p>Enter this device code:</p>
+              <div class="auth-value code-value" id="auth-code">XXXXXXXX</div>
+              <button class="btn btn-accent btn-sm" onclick="copyAuthCode()">
+                <i class="fas fa-copy"></i> Copy Code
+              </button>
+            </div>
+          </div>
+          <div class="auth-expiry" id="auth-expiry">
+            <i class="fas fa-clock"></i> Code expires in: <span id="auth-expires">--:--</span>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" onclick="closeAuthModal()">I've completed authentication</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TOAST CONTAINER ─── -->
+    <div id="toast-container"></div>
+
+    <!-- ─── AUTH ERROR MODAL (red, sticky, requires dismiss) ─── -->
+    <div class="modal-backdrop hidden" id="authz-error-modal">
+      <div class="modal authz-error-modal">
+        <div class="authz-error-header">
+          <div class="authz-error-pulse">
+            <i class="fas fa-shield-alt"></i>
+          </div>
+          <div>
+            <h2>Azure Access Denied</h2>
+            <p class="authz-error-sub">CloudHorus could not access one or more Azure scopes with the current identity.</p>
+          </div>
+        </div>
+        <div class="authz-error-body">
+          <div class="authz-error-section">
+            <h3><i class="fas fa-exclamation-triangle"></i> What happened</h3>
+            <pre id="authz-error-message"></pre>
+          </div>
+          <div class="authz-error-section">
+            <h3><i class="fas fa-tools"></i> How to fix</h3>
+            <ul>
+              <li>Verify the identity (user, Service Principal, or Managed Identity) has the <strong>Reader</strong> role at the subscription or resource group scope.</li>
+              <li>If you switched accounts recently, sign out and authenticate again.</li>
+              <li>Check that the <strong>Tenant ID</strong>, <strong>Subscription ID</strong>, and <strong>Resource Group</strong> values are correct and aligned positionally.</li>
+              <li>For Service Principal auth: confirm <code>AZURE_CLIENT_ID</code>, <code>AZURE_TENANT_ID</code>, and <code>AZURE_CLIENT_SECRET</code> are valid and the SP exists in the target tenant.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="authz-error-footer">
+          <button class="btn btn-secondary" onclick="dismissAuthzError()"><i class="fas fa-times"></i> Dismiss</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Eagle flight animation (shown during generation) -->
+    <div id="eagle-flight-overlay" class="eagle-flight-overlay hidden"></div>
+    <!-- Soaring eagle (continuous during generation) -->
+    <img id="eagle-soar" class="eagle-soar hidden" src="eagle.svg" alt="">
+
+    <!-- ─── TOUR OVERLAY ─── -->
+    <div id="tour-overlay" class="tour-overlay hidden">
+      <div class="tour-backdrop"></div>
+      <div class="tour-tooltip" id="tour-tooltip">
+        <div class="tour-tooltip-header">
+          <span class="tour-step-badge" id="tour-step-badge">1/7</span>
+          <span class="tour-title" id="tour-title"></span>
+          <button class="tour-close" onclick="endTour()" title="Close tour">&times;</button>
+        </div>
+        <div class="tour-body" id="tour-body"></div>
+        <div class="tour-footer">
+          <button class="btn btn-sm tour-btn-prev" id="tour-prev" onclick="tourPrev()">
+            <i class="fas fa-arrow-left"></i> Back
+          </button>
+          <div class="tour-dots" id="tour-dots"></div>
+          <button class="btn btn-sm btn-primary tour-btn-next" id="tour-next" onclick="tourNext()">
+            Next <i class="fas fa-arrow-right"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

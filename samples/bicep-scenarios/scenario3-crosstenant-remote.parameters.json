@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "_cloudHorus": {
+    "tenant": "test-tenant-2",
+    "subscription": "test-sub-2",
+    "resourceGroup": "test-rg-cross"
+  },
+  "parameters": {
+    "location": {
+      "value": "westeurope"
+    }
+  }
+}

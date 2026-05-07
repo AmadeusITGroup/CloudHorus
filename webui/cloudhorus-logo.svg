@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f6d365"/>
+      <stop offset="50%" stop-color="#d4a017"/>
+      <stop offset="100%" stop-color="#b8860b"/>
+    </linearGradient>
+    <linearGradient id="eyeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d4ff"/>
+      <stop offset="100%" stop-color="#0099cc"/>
+    </linearGradient>
+    <linearGradient id="darkGold" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#d4a017"/>
+      <stop offset="100%" stop-color="#8B6914"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#0d1117" stroke="url(#goldGrad)" stroke-width="4"/>
+  
+  <!-- Inner ring decoration -->
+  <circle cx="256" cy="256" r="220" fill="none" stroke="url(#darkGold)" stroke-width="1" stroke-dasharray="8 4" opacity="0.5"/>
+  
+  <!-- Eagle wings (spread) -->
+  <!-- Left wing -->
+  <path d="M256 200 
+           C 200 160, 120 130, 60 150
+           C 80 170, 100 180, 130 185
+           C 100 190, 70 200, 45 220
+           C 80 215, 120 210, 150 205
+           C 120 220, 90 240, 75 260
+           C 110 250, 150 235, 180 225
+           C 160 240, 145 260, 140 280
+           C 165 265, 190 245, 210 230
+           L 256 250" 
+        fill="url(#goldGrad)" opacity="0.9"/>
+  
+  <!-- Right wing (mirrored) -->
+  <path d="M256 200 
+           C 312 160, 392 130, 452 150
+           C 432 170, 412 180, 382 185
+           C 412 190, 442 200, 467 220
+           C 432 215, 392 210, 362 205
+           C 392 220, 422 240, 437 260
+           C 402 250, 362 235, 332 225
+           C 352 240, 367 260, 372 280
+           C 347 265, 322 245, 302 230
+           L 256 250" 
+        fill="url(#goldGrad)" opacity="0.9"/>
+  
+  <!-- Eagle body -->
+  <ellipse cx="256" cy="260" rx="45" ry="55" fill="url(#darkGold)"/>
+  
+  <!-- Eagle head -->
+  <circle cx="256" cy="195" r="32" fill="url(#goldGrad)"/>
+  
+  <!-- Eye of Horus (central) -->
+  <g filter="url(#glow)">
+    <!-- Eye outline -->
+    <path d="M230 195 Q256 175 282 195 Q256 215 230 195 Z" 
+          fill="url(#eyeGrad)" opacity="0.9"/>
+    <!-- Pupil -->
+    <circle cx="256" cy="195" r="8" fill="#001a33"/>
+    <!-- Pupil highlight -->
+    <circle cx="253" cy="192" r="3" fill="#ffffff" opacity="0.8"/>
+    <!-- Horus tear line -->
+    <path d="M256 205 C 255 225, 248 245, 240 270" 
+          fill="none" stroke="url(#eyeGrad)" stroke-width="3" stroke-linecap="round" opacity="0.8"/>
+    <!-- Horus spiral -->
+    <path d="M240 270 C 235 280, 245 290, 256 285 C 265 282, 268 275, 262 270" 
+          fill="none" stroke="url(#eyeGrad)" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+  </g>
+  
+  <!-- Beak -->
+  <path d="M256 208 L 250 220 L 262 220 Z" fill="#d4a017"/>
+  
+  <!-- Cloud wisps around eagle -->
+  <g opacity="0.3">
+    <ellipse cx="140" cy="300" rx="40" ry="15" fill="#4a9eff"/>
+    <ellipse cx="380" cy="290" rx="35" ry="12" fill="#4a9eff"/>
+    <ellipse cx="256" cy="340" rx="50" ry="12" fill="#4a9eff"/>
+  </g>
+  
+  <!-- Hieroglyphic decorative band (bottom) -->
+  <g opacity="0.4" fill="url(#goldGrad)">
+    <!-- Ankh symbols -->
+    <g transform="translate(160,380) scale(0.5)">
+      <ellipse cx="0" cy="-15" rx="10" ry="14" fill="none" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="0" y1="0" x2="0" y2="30" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="-12" y1="10" x2="12" y2="10" stroke="url(#goldGrad)" stroke-width="3"/>
+    </g>
+    <g transform="translate(256,385) scale(0.5)">
+      <ellipse cx="0" cy="-15" rx="10" ry="14" fill="none" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="0" y1="0" x2="0" y2="30" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="-12" y1="10" x2="12" y2="10" stroke="url(#goldGrad)" stroke-width="3"/>
+    </g>
+    <g transform="translate(352,380) scale(0.5)">
+      <ellipse cx="0" cy="-15" rx="10" ry="14" fill="none" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="0" y1="0" x2="0" y2="30" stroke="url(#goldGrad)" stroke-width="3"/>
+      <line x1="-12" y1="10" x2="12" y2="10" stroke="url(#goldGrad)" stroke-width="3"/>
+    </g>
+  </g>
+  
+  <!-- Top arc text path -->
+  <defs>
+    <path id="textArc" d="M100 256 A156 156 0 0 1 412 256"/>
+  </defs>
+  <text font-family="serif" font-size="22" fill="url(#goldGrad)" letter-spacing="6" font-weight="bold">
+    <textPath href="#textArc" startOffset="50%" text-anchor="middle">CLOUDHORUS</textPath>
+  </text>
+  
+  <!-- Bottom arc -->
+  <defs>
+    <path id="textArcBottom" d="M120 280 A160 160 0 0 0 392 280"/>
+  </defs>
+  <text font-family="serif" font-size="11" fill="url(#eyeGrad)" letter-spacing="3" opacity="0.7">
+    <textPath href="#textArcBottom" startOffset="50%" text-anchor="middle">DIVINE CLOUD INSIGHT</textPath>
+  </text>
+</svg>
