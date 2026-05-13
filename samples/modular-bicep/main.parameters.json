@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "environment": {
+      "value": "dev"
+    },
+    "appName": {
+      "value": "myapp"
+    },
+    "vnetAddressSpace": {
+      "value": "10.0.0.0/16"
+    },
+    "appGatewaySubnetAddressSpace": {
+      "value": "10.0.1.0/24"
+    },
+    "privateEndpointSubnetAddressSpace": {
+      "value": "10.0.2.0/24"
+    },
+    "webAppSubnetAddressSpace": {
+      "value": "10.0.3.0/24"
+    },
+    "aksSubnetAddressSpace": {
+      "value": "10.0.4.0/24"
+    },
+    "databaseSubnetAddressSpace": {
+      "value": "10.0.5.0/24"
+    },
+    "domainName": {
+      "value": "contoso.com"
+    },
+    "appServicePlanSku": {
+      "value": "P1v3"
+    },
+    "sqlDatabaseSku": {
+      "value": "S2"
+    },
+    "storageAccountSku": {
+      "value": "Standard_ZRS"
+    },
+    "aksNodeCount": {
+      "value": 3
+    },
+    "aksNodeVMSize": {
+      "value": "Standard_DS2_v2"
+    }
+  }
+}

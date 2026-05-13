@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "environment": {
+      "value": "prod"
+    },
+    "appName": {
+      "value": "contoso"
+    },
+    "vnetAddressSpace": {
+      "value": "10.1.0.0/16"
+    },
+    "appGatewaySubnetAddressSpace": {
+      "value": "10.1.1.0/24"
+    },
+    "privateEndpointSubnetAddressSpace": {
+      "value": "10.1.2.0/24"
+    },
+    "webAppSubnetAddressSpace": {
+      "value": "10.1.3.0/24"
+    },
+    "databaseSubnetAddressSpace": {
+      "value": "10.1.4.0/24"
+    },
+    "domainName": {
+      "value": "contoso.com"
+    },
+    "appServicePlanSku": {
+      "value": "P2v3"
+    },
+    "sqlDatabaseSku": {
+      "value": "S3"
+    },
+    "storageAccountSku": {
+      "value": "Standard_GRS"
+    }
+  }
+}

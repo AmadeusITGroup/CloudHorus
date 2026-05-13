@@ -1,0 +1,28 @@
+[flake8]
+max-line-length = 150
+extend-ignore =
+    # E203: whitespace before ':' (conflicts with black)
+    E203,
+    # W503: line break before binary operator (conflicts with black)
+    W503,
+    # E501: line too long (let black handle formatting; warn only on extreme cases via max-line-length)
+    # F541: f-string without placeholders (many intentional in logging)
+    F541,
+per-file-ignores =
+    # Allow unused imports in __init__.py (re-exports)
+    **/__init__.py:F401
+    # azure_cli.py: pre-existing unused imports (used at runtime / conditional),
+    # bare excepts, redefined imports (platform-guarded), unused variable in except blocks
+    src/core/azure_cli.py:F401,F811,F841,E722
+    # graph_generator.py: long graphviz template lines, bare excepts, unused imports,
+    # membership test style (pre-existing)
+    src/core/graph_generator.py:E501,E722,F401,E713
+exclude =
+    .git,
+    __pycache__,
+    build,
+    dist,
+    *.egg-info,
+    cloudhorus-env,
+    .venv,
+    venv,

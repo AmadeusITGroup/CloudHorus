@@ -1,0 +1,88 @@
+# Python bytecode / packaging
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.eggs/
+.installed.cfg
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+cloudhorus-env/
+
+# IDE / editor
+.idea/
+.vscode/
+.qodo/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated outputs (Graphviz / diagrams)
+*.dot
+*.png
+!icons/*.png
+!assets/**/*.png
+!webui/*.png
+!webui/**/*.png
+azure_resources*
+
+# Logs & temp files
+*.log
+logsdebug.txt
+tmp*
+temp-*.json
+
+# ARM template exports (generated at runtime, not source)
+*-built-template.json
+*-template.json
+!samples/**/*.json
+!tests/mock_templates/**/*.json
+
+# test-data/ — large Azure ARM exports; not shipped with the repo
+test-data/
+
+# Root-level scratch/debug files (never commit)
+/debug_*.py
+/reproduce_*.py
+/demonstrate_*.py
+/fix_*.py
+/test_*.py
+/test_*.dot
+/azure_auth_prompt.txt
+
+# Pytest cache
+.pytest_cache/
+
+# Legacy files (removed from tracking)
+ARCHITECTURE.py
+Picture1.svg
+src/main_old.py
+assets/logo/Horus.jpg
+assets/logo/logo.jfif
+
+# Test-dir debug/scratch files
+tests/simple_debug_auth.py
+tests/debug_*.py
+tests/test_all_enhanced_functions.py
+tests/test_all_enhanced_functions_fixed.py

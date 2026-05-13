@@ -1,0 +1,268 @@
+# ─── CloudHorus Release Workflow ───
+# Computes the next semver version from tags, bumps version files in the CI
+# working directory (never committed to main), creates a tag via the GitHub API
+# (bypasses branch protection), builds packages with the correct version, bundles
+# full source code, and publishes a GitHub Release with all assets.
+#
+# Trigger:
+#   • Manual dispatch → pick bump type (patch / minor / major)
+#   • Push tag v*     → skip bump, release the pushed tag as-is
+#
+# NOTE: This workflow never pushes commits to main, so it works with branch
+#       protection rules that require pull requests.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Semver bump type'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+  push:
+    tags:
+      - 'v*'          # also allow direct tag push (skip bump logic)
+
+permissions:
+  contents: write      # create tags & releases
+
+# ── Pre-flight: run CI checks before releasing ──
+jobs:
+  ci-gate:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: write
+
+  release:
+    name: Tag & Release
+    needs: ci-gate     # ← release only runs if CI passes
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout full history (tags needed for semver detection) ──
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Set up Python ──
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ── Resolve latest tag & compute next version ──
+      - name: Compute next version
+        id: semver
+        run: |
+          set -euo pipefail
+
+          BUMP="${{ github.event.inputs.bump }}"
+
+          # ── When triggered by a tag push, just use that tag ──
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            echo "NEXT_VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
+            echo "SKIP_TAG=true"             >> "$GITHUB_ENV"
+            echo "SKIP_BUMP=true"            >> "$GITHUB_ENV"
+            echo "::notice::Tag-push mode — releasing v$TAG_VERSION as-is"
+            exit 0
+          fi
+
+          # ── Fetch all tags and find the latest semver tag ──
+          git fetch --tags --force
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | sort -V \
+            | tail -n1 || true)
+
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+            echo "::notice::No existing semver tag found — starting from v0.0.0"
+          fi
+
+          echo "Latest tag: $LATEST_TAG"
+          CURRENT="${LATEST_TAG#v}"
+
+          # ── Parse MAJOR.MINOR.PATCH ──
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          echo "Current: $MAJOR.$MINOR.$PATCH  |  Bump: $BUMP"
+
+          # ── Bump ──
+          case "$BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+            *)
+              echo "::error::Invalid bump type: $BUMP"
+              exit 1
+              ;;
+          esac
+
+          NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "Next version: $NEXT_VERSION"
+
+          echo "NEXT_VERSION=$NEXT_VERSION" >> "$GITHUB_ENV"
+          echo "SKIP_TAG=false"             >> "$GITHUB_ENV"
+          echo "SKIP_BUMP=false"            >> "$GITHUB_ENV"
+          echo "LATEST_TAG=$LATEST_TAG"     >> "$GITHUB_ENV"
+
+      # ── Bump version in working directory (NOT committed to main) ──
+      - name: Bump version in source files
+        if: env.SKIP_BUMP == 'false'
+        run: |
+          set -euo pipefail
+          VERSION="${NEXT_VERSION}"
+
+          echo "Bumping version to $VERSION in working directory (CI only, not pushed to main)..."
+
+          # ── src/version.py ──
+          python3 -c "
+          import pathlib, re
+          p = pathlib.Path('src/version.py')
+          text = p.read_text()
+          text = re.sub(
+              r\"(__version__\s*=\s*['\\\"])[^'\\\"]+(['\\\"])\",
+              r'\g<1>${VERSION}\g<2>',
+              text
+          )
+          p.write_text(text)
+          print(f'  ✓ src/version.py → ${VERSION}')
+          "
+
+          # ── pyproject.toml ──
+          python3 -c "
+          import pathlib, re
+          p = pathlib.Path('pyproject.toml')
+          text = p.read_text()
+          text = re.sub(
+              r'^(version\s*=\s*\")([^\"]+)(\")',
+              r'\g<1>${VERSION}\g<3>',
+              text,
+              count=1,
+              flags=re.M
+          )
+          p.write_text(text)
+          print(f'  ✓ pyproject.toml → ${VERSION}')
+          "
+
+          # ── Validate consistency ──
+          PY_VER=$(python3 -c "
+          import re, pathlib
+          m = re.search(r\"__version__\s*=\s*['\\\"]([^'\\\"]+)['\\\"]\", pathlib.Path('src/version.py').read_text())
+          print(m.group(1))
+          ")
+          TOML_VER=$(python3 -c "
+          import re, pathlib
+          m = re.search(r'^version\s*=\s*\"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text(), re.M)
+          print(m.group(1))
+          ")
+          echo "  version.py=$PY_VER  pyproject.toml=$TOML_VER  expected=$VERSION"
+          if [ "$PY_VER" != "$VERSION" ] || [ "$TOML_VER" != "$VERSION" ]; then
+            echo "::error::Version mismatch after bump!"
+            exit 1
+          fi
+          echo "✓ All version files consistent at $VERSION (working directory only)"
+
+      # ── Create tag via GitHub API (bypasses branch protection) ──
+      - name: Create tag via API
+        if: env.SKIP_TAG == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${NEXT_VERSION}"
+          SHA=$(git rev-parse HEAD)
+
+          echo "Creating tag v${VERSION} on commit ${SHA} via GitHub API..."
+
+          # Create annotated tag object
+          TAG_SHA=$(gh api repos/${{ github.repository }}/git/tags \
+            -f tag="v${VERSION}" \
+            -f message="CloudHorus v${VERSION}" \
+            -f object="${SHA}" \
+            -f type="commit" \
+            --jq '.sha')
+
+          # Create the ref pointing to the tag object
+          gh api repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/v${VERSION}" \
+            -f sha="${TAG_SHA}"
+
+          echo "✓ Tag v${VERSION} created via API (no push to main)"
+
+      # ── Create full source code archive (includes bumped versions) ──
+      - name: Create source archive
+        run: |
+          set -euo pipefail
+          VERSION="${NEXT_VERSION}"
+          PREFIX="CloudHorus-v${VERSION}"
+
+          echo "Creating source archive with version-bumped code..."
+
+          # Use zip from working directory so bumped version files are included.
+          # Exclude CI artifacts, .git, virtualenvs, __pycache__, and output dirs.
+          mkdir -p dist
+
+          cd .. && zip -r "CloudHorus/dist/${PREFIX}-source.zip" "CloudHorus/" \
+            -x "CloudHorus/.git/*" \
+            -x "CloudHorus/dist/*" \
+            -x "CloudHorus/__pycache__/*" \
+            -x "CloudHorus/*.pyc" \
+            -x "CloudHorus/cloudhorus-env/*" \
+            -x "CloudHorus/azure_resources_*/*" \
+            -x "CloudHorus/.github/*" \
+            && cd CloudHorus
+
+          echo "✓ Source archive created:"
+          ls -lh dist/${PREFIX}-source.zip
+
+      # ── Extract changelog section for this version ──
+      - name: Extract release notes
+        id: changelog
+        run: |
+          VERSION="${NEXT_VERSION}"
+          NOTES=$(python3 -c "
+          import re, pathlib
+          text = pathlib.Path('CHANGELOG.md').read_text()
+          pattern = r'## \[' + re.escape('${VERSION}') + r'\].*?\n(.*?)(?=\n## \[|\Z)'
+          m = re.search(pattern, text, re.S)
+          print(m.group(1).strip() if m else 'No changelog entry found for this version.')
+          ")
+          echo "$NOTES" > /tmp/release_notes.md
+          echo "notes_file=/tmp/release_notes.md" >> "$GITHUB_OUTPUT"
+
+      # ── Create GitHub Release ──
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: "v${{ env.NEXT_VERSION }}"
+          name: "CloudHorus v${{ env.NEXT_VERSION }}"
+          bodyFile: ${{ steps.changelog.outputs.notes_file }}
+          draft: false
+          prerelease: ${{ contains(env.NEXT_VERSION, '-') }}
+          generateReleaseNotes: true
+          artifacts: "dist/*"
+          token: ${{ secrets.GITHUB_TOKEN }}

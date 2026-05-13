@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "_cloudHorus": {
+    "tenant": "test-tenant-1",
+    "subscription": "test-sub-1",
+    "resourceGroup": "test-rg-app"
+  },
+  "parameters": {
+    "subscriptionId": {
+      "value": "test-sub-1"
+    },
+    "remoteSubscriptionId": {
+      "value": "test-sub-2"
+    },
+    "networkRg": {
+      "value": "test-rg-network"
+    },
+    "appRg": {
+      "value": "test-rg-app"
+    },
+    "remoteRg": {
+      "value": "test-rg-cross"
+    },
+    "location": {
+      "value": "westeurope"
+    }
+  }
+}
