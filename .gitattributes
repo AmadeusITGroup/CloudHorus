@@ -1,0 +1,5 @@
+# Exclude IDE/tool folders from GitHub-generated archives (Download ZIP)
+.qodo/          export-ignore
+.vscode/        export-ignore
+.idea/          export-ignore
+.github/        export-ignore

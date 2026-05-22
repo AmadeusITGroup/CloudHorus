@@ -228,6 +228,7 @@ jobs:
 
           cd .. && zip -r "CloudHorus/dist/${PREFIX}-source.zip" "CloudHorus/" \
             -x "CloudHorus/.git/*" \
+            -x "CloudHorus/.qodo/*" \
             -x "CloudHorus/dist/*" \
             -x "CloudHorus/__pycache__/*" \
             -x "CloudHorus/*.pyc" \
