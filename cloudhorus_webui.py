@@ -15,12 +15,18 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from typing import Any, Dict, List, Optional
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
 import webview
+from core.local_input_metadata import parse_scope_metadata_files
 
 # ─── Constants ───────────────────────────────────────────────────────────
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 WEBUI_DIR = os.path.join(PROJECT_ROOT, "webui")
 AUTH_FILE = os.path.join(PROJECT_ROOT, "azure_auth_prompt.txt")
 _LOGO_DIR = os.path.join(PROJECT_ROOT, "assets", "logo")
@@ -77,7 +83,8 @@ class CloudHorusAPI:
         """Open native file picker dialog.
 
         Args:
-            file_type: 'bicep' for .bicep files, 'params' for .json files
+            file_type: 'bicep' for .bicep files, 'params' for .json files,
+                'terraform-main' for .tf files, 'terraform-vars' for .tfvars files
 
         Returns:
             List of selected file paths
@@ -85,13 +92,26 @@ class CloudHorusAPI:
         if not self._window:
             return []
 
-        if file_type == "bicep":
-            file_types = ("Bicep Files (*.bicep)", "All Files (*.*)")
-        else:
-            file_types = ("JSON Files (*.json)", "All Files (*.*)")
+        try:
+            if file_type == "bicep":
+                file_types = ("Bicep Files (*.bicep)", "All Files (*.*)")
+            elif file_type == "terraform-main":
+                file_types = ("Terraform Entry Files (*.tf)", "All Files (*.*)")
+            elif file_type == "terraform-vars":
+                file_types = ("Terraform Variable Files (*.tfvars)", "All Files (*.*)")
+            else:
+                file_types = ("JSON Files (*.json)", "All Files (*.*)")
 
-        result = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True, file_types=file_types)
-        return list(result) if result else []
+            result = self._window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                allow_multiple=True,
+                file_types=file_types,
+            )
+            return list(result) if result else []
+        except Exception as exc:
+            print(f"[CloudHorus WebUI] File picker failed for {file_type}: {exc}", file=sys.stderr)
+            traceback.print_exc()
+            return []
 
     # ─── Bicep Metadata Parsing ──────────────────────────────────────
 
@@ -109,40 +129,11 @@ class CloudHorusAPI:
             Dict with 'subscriptions' (ordered unique list of dicts with
             id, tenant, resourceGroups) and 'errors' (list of error strings)
         """
-        subs_map: Dict[str, Dict[str, Any]] = {}  # sub_id -> {tenant, resourceGroups}
-        sub_order: List[str] = []  # ordered unique sub IDs
-        template_sub_map: List[int] = []  # per-template index into sub_order
-        errors: List[str] = []
+        return parse_scope_metadata_files(file_paths)
 
-        for fp in file_paths:
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                meta = data.get("_cloudHorus", {})
-                sub_id = meta.get("subscription", "")
-                tenant = meta.get("tenant", "")
-                rg = meta.get("resourceGroup", "")
-
-                if not sub_id:
-                    errors.append(f"{os.path.basename(fp)}: missing _cloudHorus.subscription")
-                    template_sub_map.append(-1)
-                    continue
-
-                if sub_id not in subs_map:
-                    subs_map[sub_id] = {"tenant": tenant, "resourceGroups": []}
-                    sub_order.append(sub_id)
-                if rg and rg not in subs_map[sub_id]["resourceGroups"]:
-                    subs_map[sub_id]["resourceGroups"].append(rg)
-                template_sub_map.append(sub_order.index(sub_id))
-            except (json.JSONDecodeError, OSError) as e:
-                errors.append(f"{os.path.basename(fp)}: {e}")
-                template_sub_map.append(-1)
-
-        subscriptions = [
-            {"id": sid, "tenant": subs_map[sid]["tenant"], "resourceGroups": subs_map[sid]["resourceGroups"]}
-            for sid in sub_order
-        ]
-        return {"subscriptions": subscriptions, "templateSubMap": template_sub_map, "errors": errors}
+    def parse_scope_metadata(self, file_paths: List[str]) -> Dict[str, Any]:
+        """Parse explicit scope metadata files for Terraform JSON inputs."""
+        return parse_scope_metadata_files(file_paths)
 
     # ─── Generation ──────────────────────────────────────────────────
 
@@ -347,10 +338,13 @@ class CloudHorusAPI:
 
         mode = args.get("mode", "live")
         if mode is None:
-            # Detect mode from presence of bicepFiles
-            mode = "bicep" if args.get("bicepFiles") else "live"
+            # Detect mode from presence of local template inputs
+            if args.get("terraformRootDirs"):
+                mode = "terraform"
+            else:
+                mode = "bicep" if args.get("bicepFiles") else "live"
 
-        if mode == "live" or (not args.get("bicepFiles")):
+        if mode == "live":
             # Live mode args
             tenants = args.get("tenants", "").strip()
             subs = args.get("subscriptions", "").strip()
@@ -366,6 +360,13 @@ class CloudHorusAPI:
             discoverRgs = args.get("discoverResourceGroups", [])
             if discoverRgs and len(discoverRgs) > 0:
                 cmd.extend(["--discoverResourceGroups"] + discoverRgs)
+        elif mode == "terraform":
+            terraform_root_dirs = args.get("terraformRootDirs", [])
+            terraform_var_files = args.get("terraformVarFiles", [])
+            if terraform_root_dirs:
+                cmd.extend(["--terraformRootDirs"] + terraform_root_dirs)
+            if terraform_var_files:
+                cmd.extend(["--terraformVarFiles"] + terraform_var_files)
         else:
             # Bicep mode args
             bicep_files = args.get("bicepFiles", [])

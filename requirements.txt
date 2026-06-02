@@ -3,6 +3,7 @@ graphviz>=0.20
 tqdm>=4.65.0
 colorama>=0.4.6
 Pillow>=9.0.0
+python-hcl2>=8.1.0
 
 # GUI — Modern Web UI (pywebview)
 pywebview>=5.0

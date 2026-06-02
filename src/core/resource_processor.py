@@ -6,7 +6,12 @@ from typing import Any, Dict, List, Optional
 from utils.graph_utils import should_skip
 from utils.logger import SingletonLogger
 
-from .azure_cli import export_resource_group_template, get_pe_subnet, is_resource_group_in_subscription
+from .azure_cli import (
+    export_resource_group_template,
+    get_pe_subnet,
+    get_template_data_for_resource_group,
+    is_resource_group_in_subscription,
+)
 
 logger = SingletonLogger().get_logger()
 
@@ -125,37 +130,36 @@ def get_subnet_implicit_dependencies(
         rg_limit = original_rg_count if original_rg_count is not None else len(resource_groups)
         original_rgs = list(resource_groups[:rg_limit])
         for rg_index, resourceGroup in enumerate(original_rgs):
+            template: Optional[Dict[str, Any]] = None
             if use_local_template:
-                # Bicep mode: Build template from Bicep files
-                if not bicep_files or not parameters_files or not subscriptions:
-                    logger.warning(f"Bicep mode enabled but missing required parameters for {resourceGroup}")
-                    continue
-
-                # Determine which Bicep template to use for this resource group.
-                # Each RG maps to a Bicep template by index (same order as resource_groups).
-                try:
-                    if rg_index < len(bicep_files):
-                        bicep_file = bicep_files[rg_index]
-                        parameters_file = parameters_files[rg_index]
-                    else:
-                        # Fallback to last template if we have more RGs than templates
-                        bicep_file = bicep_files[-1]
-                        parameters_file = parameters_files[-1]
-
-                    logger.info(
-                        f"Building Bicep template for subnet dependencies: {bicep_file} with parameters: {parameters_file}"
-                    )
-                    from .bicep_builder import build_bicep_template
-
-                    output_file = build_bicep_template(bicep_file, parameters_file)
-                    if not output_file:
-                        logger.error(f"Failed to build Bicep template for resource group {resourceGroup}")
+                template = get_template_data_for_resource_group(resourceGroup)
+                if template is None:
+                    # Legacy fallback: build Bicep template when the template registry has not been primed yet.
+                    if not bicep_files or not parameters_files or not subscriptions:
+                        logger.warning(f"Local template mode enabled but no registered template found for {resourceGroup}")
                         continue
-                    logger.info(f"Built Bicep template to {output_file} for subnet dependency analysis")
 
-                except Exception as e:
-                    logger.error(f"Error building Bicep template for {resourceGroup}: {e}")
-                    continue
+                    try:
+                        if rg_index < len(bicep_files):
+                            bicep_file = bicep_files[rg_index]
+                            parameters_file = parameters_files[rg_index]
+                        else:
+                            bicep_file = bicep_files[-1]
+                            parameters_file = parameters_files[-1]
+
+                        logger.info(
+                            f"Building Bicep template for subnet dependencies: {bicep_file} with parameters: {parameters_file}"
+                        )
+                        from .bicep_builder import build_bicep_template
+
+                        output_file = build_bicep_template(bicep_file, parameters_file)
+                        if not output_file:
+                            logger.error(f"Failed to build Bicep template for resource group {resourceGroup}")
+                            continue
+                        logger.info(f"Built Bicep template to {output_file} for subnet dependency analysis")
+                    except Exception as e:
+                        logger.error(f"Error building Bicep template for {resourceGroup}: {e}")
+                        continue
             else:
                 # Azure mode: Export from Azure Resource Manager
                 if is_resource_group_in_subscription(resourceGroup, subscription_id, use_local_template):
@@ -171,10 +175,11 @@ def get_subnet_implicit_dependencies(
 
             # Initialize and parse the template variable inside the loop
             try:
-                with open(output_file, "r") as file:
-                    template = json.load(file)
+                if template is None:
+                    with open(output_file, "r") as file:
+                        template = json.load(file)
                 logger.info(
-                    f'Processing resources in {"Bicep template" if use_local_template else f"resource group {resourceGroup}"} for subnet dependencies'
+                    f'Processing resources in {"local template" if use_local_template else f"resource group {resourceGroup}"} for subnet dependencies'
                 )
             except (json.JSONDecodeError, FileNotFoundError) as e:
                 logger.error(f"Failed to load template file {output_file}: {e}")

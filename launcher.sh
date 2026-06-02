@@ -389,6 +389,7 @@ install_python_deps() {
         "dash:dash"
         "colorama:colorama"
         "PIL:Pillow"
+        "hcl2:python-hcl2"
         "tqdm:tqdm"
         "azure.identity:azure-identity"
         "azure.mgmt.resource:azure-mgmt-resource"

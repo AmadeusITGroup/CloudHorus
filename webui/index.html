@@ -69,7 +69,9 @@
           <h2 class="section-title"><i class="fas fa-layer-group"></i> Mode</h2>
           <div class="mode-cards">
             <label class="mode-card active" id="mode-live" onclick="selectMode('live')">
-              <div class="mode-card-icon"><i class="fas fa-cloud"></i></div>
+              <div class="mode-card-icon">
+                <img class="mode-logo" src="./assets/mode-icons/azure.png" alt="Azure logo">
+              </div>
               <div class="mode-card-body">
                 <strong>Live Azure</strong>
                 <span>Scan real resources</span>
@@ -77,10 +79,25 @@
               <div class="mode-card-check"><i class="fas fa-check-circle"></i></div>
             </label>
             <label class="mode-card" id="mode-bicep" onclick="selectMode('bicep')">
-              <div class="mode-card-icon"><i class="fas fa-file-code"></i></div>
+              <div class="mode-card-icon">
+                <img class="mode-logo" src="./assets/mode-icons/bicep.png" alt="Bicep logo">
+              </div>
               <div class="mode-card-body">
                 <strong>Bicep Templates</strong>
                 <span>Offline analysis</span>
+              </div>
+              <div class="mode-card-check"><i class="fas fa-check-circle"></i></div>
+            </label>
+            <label class="mode-card" id="mode-terraform" onclick="selectMode('terraform')">
+              <div class="mode-card-icon">
+                <img class="mode-logo" src="./assets/mode-icons/terraform.svg" alt="Terraform logo">
+              </div>
+              <div class="mode-card-body">
+                <strong>
+                  Terraform
+                  <span class="info-icon mode-card-info" data-tooltip="Offline source mode. Select one main.tf file per Terraform stack and align the .tfvars files in the same order. CloudHorus parses the local HCL directly, so no Azure login is required."><i class="fas fa-info-circle"></i></span>
+                </strong>
+                <span>Main.tf + tfvars</span>
               </div>
               <div class="mode-card-check"><i class="fas fa-check-circle"></i></div>
             </label>
@@ -236,13 +253,13 @@
 
           <div class="file-drop-zone" id="drop-bicep" ondrop="handleDrop(event,'bicep')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
             <i class="fas fa-cloud-upload-alt"></i>
-            <p>Drop Bicep files here or <button class="link-btn" onclick="pickBicepFiles()">browse</button></p>
+            <p>Drop Bicep files here or <button type="button" class="link-btn" onclick="pickBicepFiles()">browse</button></p>
             <div class="file-list" id="file-list-bicep"></div>
           </div>
 
           <div class="file-drop-zone" id="drop-params" ondrop="handleDrop(event,'params')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" style="margin-top:12px">
             <i class="fas fa-cog"></i>
-            <p>Drop Parameter files here or <button class="link-btn" onclick="pickParamFiles()">browse</button></p>
+            <p>Drop Parameter files here or <button type="button" class="link-btn" onclick="pickParamFiles()">browse</button></p>
             <div class="file-list" id="file-list-params"></div>
           </div>
 
@@ -251,6 +268,23 @@
             <h3 class="subsection-title"><i class="fas fa-sliders-h"></i> Per-Subscription Settings</h3>
             <p class="hint-text">Derived from <code>_cloudHorus</code> metadata in parameter files.</p>
             <div id="bicep-per-sub-grid"></div>
+          </div>
+        </section>
+
+        <!-- Terraform Mode: File Selection -->
+        <section class="panel-section terraform-files animate-in hidden" id="section-terraform-files">
+          <h2 class="section-title"><i class="fas fa-code-branch"></i> Terraform Files</h2>
+
+          <div class="file-drop-zone" id="drop-terraform-main" ondrop="handleDrop(event,'terraform-main')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+            <i class="fas fa-file-code"></i>
+            <p>Select Terraform entry files named <code>main.tf</code> or <button type="button" class="link-btn" onclick="pickTerraformMainFiles()">browse</button><span class="info-icon" data-tooltip="Offline mode. No Azure login required. Choose one main.tf file per Terraform stack. Repeated browse actions append new stacks instead of replacing the existing selection."><i class="fas fa-info-circle"></i></span></p>
+            <div class="file-list" id="file-list-terraform-main"></div>
+          </div>
+
+          <div class="file-drop-zone" id="drop-terraform-vars" ondrop="handleDrop(event,'terraform-vars')" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" style="margin-top:12px">
+            <i class="fas fa-sliders-h"></i>
+            <p>Select matching Terraform variable files ending in <code>.tfvars</code> or <button type="button" class="link-btn" onclick="pickTerraformVarFiles()">browse</button><span class="info-icon" data-tooltip="Select one .tfvars file per Terraform stack. The number and order must match the selected main.tf files so each stack receives the correct variables."><i class="fas fa-info-circle"></i></span></p>
+            <div class="file-list" id="file-list-terraform-vars"></div>
           </div>
         </section>
 

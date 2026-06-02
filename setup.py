@@ -32,6 +32,7 @@ INSTALL_REQUIRES = [
     "tqdm>=4.65.0",
     "colorama>=0.4.6",
     "Pillow>=9.0.0",
+    "python-hcl2>=8.1.0",
     "pywebview>=5.0",
 ]
 

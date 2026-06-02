@@ -526,9 +526,25 @@ body {
 .mode-cards {
   display: flex;
   gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+.mode-cards::-webkit-scrollbar {
+  height: 8px;
+}
+.mode-cards::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 999px;
+}
+.mode-cards::-webkit-scrollbar-track {
+  background: transparent;
 }
 .mode-card {
-  flex: 1;
+  flex: 0 0 172px;
+  min-width: 172px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -539,6 +555,7 @@ body {
   transition: all var(--transition-base);
   background: var(--bg-elevated);
   position: relative;
+  scroll-snap-align: start;
 }
 .mode-card:hover {
   border-color: var(--accent-primary);
@@ -554,26 +571,44 @@ body {
   width: 40px;
   height: 40px;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  font-size: 1.1rem;
   flex-shrink: 0;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+}
+.mode-logo {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  display: block;
 }
 .mode-card-body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .mode-card-body strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: clamp(0.85rem, 1vw, 1rem);
   color: var(--text-primary);
 }
 .mode-card-body span {
   font-size: clamp(0.7rem, 0.85vw, 0.82rem);
   color: var(--text-muted);
+}
+.mode-card-info {
+  flex-shrink: 0;
+}
+[data-theme="light"] .mode-card-icon {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow: 0 6px 14px rgba(120, 90, 30, 0.10);
 }
 .mode-card-check {
   position: absolute;
@@ -962,6 +997,11 @@ body {
   color: var(--text-muted);
 }
 .file-drop-zone p {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
   font-size: clamp(0.8rem, 0.95vw, 0.95rem);
 }
 .file-drop-zone.drag-over {
@@ -1000,6 +1040,12 @@ body {
   cursor: pointer;
   text-decoration: underline;
   font-size: inherit;
+}
+.file-drop-zone code {
+  font: 600 0.86em/1.4 var(--font-mono);
+}
+.file-drop-zone .info-icon {
+  margin-left: 2px;
 }
 
 /* ─── Per-Subscription Settings ─── */

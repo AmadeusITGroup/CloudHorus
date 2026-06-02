@@ -59,6 +59,13 @@ temp-*.json
 !samples/**/*.json
 !tests/mock_templates/**/*.json
 
+# Terraform generated files
+.terraform/
+samples/**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
 # test-data/ — large Azure ARM exports; not shipped with the repo
 test-data/
 

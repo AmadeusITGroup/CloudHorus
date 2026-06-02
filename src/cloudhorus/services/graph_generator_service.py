@@ -70,8 +70,12 @@ class GraphGeneratorService(BaseService):
         subscriptions: List[str],
         resource_groups: List[str],
         use_bicep_templates: bool = False,
+        local_template_mode: Optional[str] = None,
         bicep_files: Optional[List[str]] = None,
         parameters_files: Optional[List[str]] = None,
+        terraform_json_files: Optional[List[str]] = None,
+        terraform_root_dirs: Optional[List[str]] = None,
+        terraform_var_files: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Generate Azure resource graph - delegates to original logic."""
         # Import here to avoid circular dependency
@@ -105,8 +109,12 @@ class GraphGeneratorService(BaseService):
             discoverResourceGroups=self.config.discover_resource_groups,
             exportDrawio=self.config.export_drawio,
             use_local_template=use_bicep_templates,
+            local_template_mode=local_template_mode,
             bicep_files=bicep_files,
             parameters_files=parameters_files,
+            terraform_json_files=terraform_json_files,
+            terraform_root_dirs=terraform_root_dirs,
+            terraform_var_files=terraform_var_files,
         )
 
         # Return the actual PNG path from the generator

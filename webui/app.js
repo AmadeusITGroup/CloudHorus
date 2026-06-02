@@ -23,6 +23,8 @@ const state = {
   envTab: 'linux',
   bicepFiles: [],
   paramFiles: [],
+  terraformMainFiles: [],
+  terraformVarFiles: [],
   bicepSubscriptions: [],  // parsed from _cloudHorus metadata
   templateSubMap: [],       // maps each template index -> unique subscription index
   running: false,
@@ -362,6 +364,7 @@ const TICKER_TIPS = [
   { icon: 'fa-layer-group', text: 'Tip: Enable Subnet Optimization to hide unused subnets in large VNets' },
   { icon: 'fa-network-wired', text: 'Tip: PE Optimization groups Private Endpoints by subnet context' },
   { icon: 'fa-file-code', text: 'Bicep Mode: Analyze Bicep templates without an Azure subscription' },
+  { icon: 'fa-code-branch', text: 'Terraform Mode: Analyze main.tf plus tfvars offline' },
   { icon: 'fa-cloud', text: 'Live Mode: Scan real tenants, subscriptions & resource groups' },
   { icon: 'fa-arrows-alt-h', text: 'Tip: Increase edge length (2-3) if edges overlap around hubs' },
   { icon: 'fa-shield-alt', text: 'Tip: Cross-PE Optimization hides PEs without cross-tenant dependencies' },
@@ -397,19 +400,29 @@ function selectMode(mode) {
   state.mode = mode;
   document.getElementById('mode-live').classList.toggle('active', mode === 'live');
   document.getElementById('mode-bicep').classList.toggle('active', mode === 'bicep');
+  document.getElementById('mode-terraform').classList.toggle('active', mode === 'terraform');
 
   const azureSection = document.getElementById('section-azure-scope');
   const bicepSection = document.getElementById('section-bicep-files');
+  const terraformSection = document.getElementById('section-terraform-files');
   const authSection = document.getElementById('section-auth');
 
   if (mode === 'live') {
     azureSection.classList.remove('hidden');
     bicepSection.classList.add('hidden');
+    terraformSection.classList.add('hidden');
     if (authSection) authSection.classList.remove('hidden');
-  } else {
+  } else if (mode === 'bicep') {
     azureSection.classList.add('hidden');
     bicepSection.classList.remove('hidden');
-    // Bicep mode is offline — hide auth and force device-code (no SP needed)
+    terraformSection.classList.add('hidden');
+    // Offline modes hide auth and force device-code (no SP needed)
+    if (authSection) authSection.classList.add('hidden');
+    state.authMethod = 'device-code';
+  } else {
+    azureSection.classList.add('hidden');
+    bicepSection.classList.add('hidden');
+    terraformSection.classList.remove('hidden');
     if (authSection) authSection.classList.add('hidden');
     state.authMethod = 'device-code';
   }
@@ -796,23 +809,71 @@ function toggleMini(el, event) {
 async function pickBicepFiles() {
   const a = api();
   if (!a) return;
-  const files = await a.pick_files('bicep');
-  if (files && files.length > 0) {
-    state.bicepFiles = files;
-    renderFileChips('bicep');
-    refreshPreview();
+  try {
+    const files = await a.pick_files('bicep');
+    if (files && files.length > 0) {
+      state.bicepFiles = files;
+      renderFileChips('bicep');
+      refreshPreview();
+    }
+  } catch (e) {
+    showToast('Bicep file picker failed', 'error');
+  }
+}
+
+async function pickTerraformMainFiles() {
+  const a = api();
+  if (!a) return;
+  try {
+    const files = await a.pick_files('terraform-main');
+    if (files && files.length > 0) {
+      const accepted = files.filter(file => file.replace(/\\/g, '/').endsWith('/main.tf') || file === 'main.tf');
+      const rejected = files.length - accepted.length;
+      state.terraformMainFiles = mergeUniqueFiles(state.terraformMainFiles, accepted);
+      renderFileChips('terraform-main');
+      refreshPreview();
+      if (rejected > 0) {
+        showToast('Terraform mode only accepts files named main.tf', 'warning');
+      }
+    }
+  } catch (e) {
+    showToast('Terraform main.tf picker failed', 'error');
+  }
+}
+
+async function pickTerraformVarFiles() {
+  const a = api();
+  if (!a) return;
+  try {
+    const files = await a.pick_files('terraform-vars');
+    if (files && files.length > 0) {
+      const accepted = files.filter(file => file.toLowerCase().endsWith('.tfvars'));
+      const rejected = files.length - accepted.length;
+      state.terraformVarFiles = mergeUniqueFiles(state.terraformVarFiles, accepted);
+      renderFileChips('terraform-vars');
+      refreshPreview();
+      if (rejected > 0) {
+        showToast('Terraform mode only accepts files ending in .tfvars', 'warning');
+      }
+    }
+  } catch (e) {
+    showToast('Terraform tfvars picker failed', 'error');
   }
 }
 
 async function pickParamFiles() {
   const a = api();
   if (!a) return;
-  const files = await a.pick_files('params');
-  if (files && files.length > 0) {
-    state.paramFiles = files;
-    renderFileChips('params');
-    await parseBicepParamsMetadata();
-    refreshPreview();
+  try {
+    const files = await a.pick_files('params');
+    if (files && files.length > 0) {
+      state.paramFiles = files;
+      renderFileChips('params');
+      await parseBicepParamsMetadata();
+      refreshPreview();
+    }
+  } catch (e) {
+    showToast('Parameter file picker failed', 'error');
   }
 }
 
@@ -840,11 +901,20 @@ async function parseBicepParamsMetadata() {
 }
 
 function renderBicepPerSubControls() {
-  const container = document.getElementById('bicep-per-sub-options');
-  const grid = document.getElementById('bicep-per-sub-grid');
+  renderOfflinePerSubControls({
+    containerId: 'bicep-per-sub-options',
+    gridId: 'bicep-per-sub-grid',
+    subscriptions: state.bicepSubscriptions,
+    prefix: 'bicep'
+  });
+}
+
+function renderOfflinePerSubControls({ containerId, gridId, subscriptions, prefix }) {
+  const container = document.getElementById(containerId);
+  const grid = document.getElementById(gridId);
   if (!container || !grid) return;
 
-  if (state.bicepSubscriptions.length === 0) {
+  if (!subscriptions || subscriptions.length === 0) {
     container.classList.add('hidden');
     grid.innerHTML = '';
     return;
@@ -853,12 +923,10 @@ function renderBicepPerSubControls() {
   container.classList.remove('hidden');
   grid.innerHTML = '';
 
-  state.bicepSubscriptions.forEach((sub, i) => {
+  subscriptions.forEach((sub, i) => {
     const shortId = sub.id.length > 16 ? sub.id.substring(0, 12) + '...' : sub.id;
-    const rgList = sub.resourceGroups.join(', ');
-    const rgCount = sub.resourceGroups.length;
-
-    // Dynamic heuristic recommendations
+    const rgList = (sub.resourceGroups || []).join(', ');
+    const rgCount = (sub.resourceGroups || []).length;
     const recommendSubnetOpt = rgCount > 6;
     const baseEdge = Math.min(4 + (rgCount > 8 ? 1 : 0) + (rgCount > 15 ? 2 : 0), 8);
 
@@ -867,27 +935,27 @@ function renderBicepPerSubControls() {
     row.innerHTML = `
       <div class="per-sub-row-header">
         <i class="fas fa-layer-group"></i> Subscription ${i + 1}: ${shortId}
-        <span class="per-sub-rg-hint">(${rgCount} RG${rgCount !== 1 ? 's' : ''}: ${rgList})</span>
+        <span class="per-sub-rg-hint">(${rgCount} RG${rgCount !== 1 ? 's' : ''}${rgList ? ': ' + rgList : ''})</span>
       </div>
       <div class="per-sub-toggles">
         <label class="per-sub-toggle">
           <span>Subnet Opt<span class="info-icon" data-tooltip="Hides subnets that don't have VNet integration. Useful to avoid plotting all subnets in a Landing Zone VNet and keep only those linked to Private Endpoints."><i class="fas fa-info-circle"></i></span></span>
-          <input type="checkbox" id="bicep-sub-subnet-${i}" ${recommendSubnetOpt ? 'checked' : ''} onchange="refreshPreview()">
+          <input type="checkbox" id="${prefix}-sub-subnet-${i}" ${recommendSubnetOpt ? 'checked' : ''} onchange="refreshPreview()">
           <span class="mini-toggle" onclick="toggleMini(this, event)"></span>
         </label>
         <label class="per-sub-toggle">
           <span>PE Opt<span class="info-icon" data-tooltip="Groups and moves Private Endpoints by their subnet context for a cleaner layout. Enabled by default."><i class="fas fa-info-circle"></i></span></span>
-          <input type="checkbox" id="bicep-sub-pe-${i}" checked onchange="refreshPreview()">
+          <input type="checkbox" id="${prefix}-sub-pe-${i}" checked onchange="refreshPreview()">
           <span class="mini-toggle" onclick="toggleMini(this, event)"></span>
         </label>
         <label class="per-sub-toggle">
           <span>Cross-PE Opt<span class="info-icon" data-tooltip="Hides Private Endpoints that have no cross-tenant dependencies with resources (not VNet integration). Enable for performance and clarity in multi-tenant architectures."><i class="fas fa-info-circle"></i></span></span>
-          <input type="checkbox" id="bicep-sub-crosspe-${i}" onchange="refreshPreview()">
+          <input type="checkbox" id="${prefix}-sub-crosspe-${i}" onchange="refreshPreview()">
           <span class="mini-toggle" onclick="toggleMini(this, event)"></span>
         </label>
         <label class="per-sub-toggle">
           <span>RG Edge Len<span class="info-icon" data-tooltip="Controls spacing between resource groups within this subscription. Increase (5-8) if groups overlap. Auto-recommendation: 4 base, +1 if >8 RGs, +2 if >15 RGs."><i class="fas fa-info-circle"></i></span></span>
-          <input type="number" class="per-sub-edge-input" id="bicep-sub-rgedge-${i}" value="${baseEdge}" min="1" max="10" onchange="refreshPreview()">
+          <input type="number" class="per-sub-edge-input" id="${prefix}-sub-rgedge-${i}" value="${baseEdge}" min="1" max="10" onchange="refreshPreview()">
         </label>
       </div>
     `;
@@ -913,7 +981,7 @@ function handleDrop(e, type) {
 }
 
 function renderFileChips(type) {
-  const list = type === 'bicep' ? state.bicepFiles : state.paramFiles;
+  const list = getFileList(type);
   const container = document.getElementById(`file-list-${type}`);
   container.innerHTML = list.map((f, i) => {
     const name = f.split(/[/\\]/).pop();
@@ -928,13 +996,44 @@ function renderFileChips(type) {
 function removeFile(type, index) {
   if (type === 'bicep') {
     state.bicepFiles.splice(index, 1);
-  } else {
+  } else if (type === 'params') {
     state.paramFiles.splice(index, 1);
     // Re-parse metadata after removing a param file
     parseBicepParamsMetadata();
+  } else if (type === 'terraform-main') {
+    state.terraformMainFiles.splice(index, 1);
+  } else {
+    state.terraformVarFiles.splice(index, 1);
   }
   renderFileChips(type);
   refreshPreview();
+}
+
+function getFileList(type) {
+  if (type === 'bicep') return state.bicepFiles;
+  if (type === 'params') return state.paramFiles;
+  if (type === 'terraform-main') return state.terraformMainFiles;
+  if (type === 'terraform-vars') return state.terraformVarFiles;
+  return [];
+}
+
+function mergeUniqueFiles(existingFiles, newFiles) {
+  const merged = [...(existingFiles || [])];
+  for (const file of newFiles || []) {
+    if (!merged.includes(file)) {
+      merged.push(file);
+    }
+  }
+  return merged;
+}
+
+function terraformRootDirsFromMainFiles(mainFiles) {
+  return (mainFiles || []).map(path => {
+    const normalized = path.replace(/\\/g, '/');
+    const parts = normalized.split('/');
+    parts.pop();
+    return parts.join('/') || '.';
+  });
 }
 
 // ─── Build Command ───
@@ -957,6 +1056,9 @@ function buildCommandArgs() {
     args.subscriptions = document.getElementById('input-subscriptions').value.trim();
     args.resourcegroups = document.getElementById('input-resourcegroups').value.trim();
     args.discoverResourceGroups = Array.from(discoveryStore);
+  } else if (state.mode === 'terraform') {
+    args.terraformRootDirs = terraformRootDirsFromMainFiles(state.terraformMainFiles);
+    args.terraformVarFiles = state.terraformVarFiles;
   } else {
     args.bicepFiles = state.bicepFiles;
     args.parametersFiles = state.paramFiles;
@@ -988,37 +1090,42 @@ function buildCommandArgs() {
       args.crossPeOptimization.push(crossEl ? crossEl.checked : false);
       args.resourceGroupsEdgeLengthListBySubscription.push(edgeEl ? parseInt(edgeEl.value) || 4 : 4);
     }
-  } else if (state.bicepSubscriptions.length > 0 && state.templateSubMap.length > 0) {
-    // Read per-unique-subscription settings from UI controls
-    const uniqueSubnet = [];
-    const uniquePe = [];
-    const uniqueCross = [];
-    const uniqueEdge = [];
-    for (let i = 0; i < state.bicepSubscriptions.length; i++) {
-      const subEl = document.getElementById(`bicep-sub-subnet-${i}`);
-      const peEl = document.getElementById(`bicep-sub-pe-${i}`);
-      const crossEl = document.getElementById(`bicep-sub-crosspe-${i}`);
-      const edgeEl = document.getElementById(`bicep-sub-rgedge-${i}`);
-      uniqueSubnet.push(subEl ? subEl.checked : false);
-      uniquePe.push(peEl ? peEl.checked : true);
-      uniqueCross.push(crossEl ? crossEl.checked : false);
-      uniqueEdge.push(edgeEl ? parseInt(edgeEl.value) || 4 : 4);
-    }
-    // Expand to per-template arrays using templateSubMap (main.py expects one per template)
-    args.subnetOptimization = [];
-    args.peOptimization = [];
-    args.crossPeOptimization = [];
-    args.resourceGroupsEdgeLengthListBySubscription = [];
-    for (const idx of state.templateSubMap) {
-      const si = idx >= 0 ? idx : 0;
-      args.subnetOptimization.push(uniqueSubnet[si] ?? false);
-      args.peOptimization.push(uniquePe[si] ?? true);
-      args.crossPeOptimization.push(uniqueCross[si] ?? false);
-      args.resourceGroupsEdgeLengthListBySubscription.push(uniqueEdge[si] ?? 4);
-    }
+  } else if (state.mode === 'bicep') {
+    applyOfflinePerSubscriptionArgs(args, state.bicepSubscriptions, state.templateSubMap, 'bicep');
   }
 
   return args;
+}
+
+function applyOfflinePerSubscriptionArgs(args, subscriptions, templateSubMap, prefix) {
+  if (!subscriptions || subscriptions.length === 0 || !templateSubMap || templateSubMap.length === 0) return;
+
+  const uniqueSubnet = [];
+  const uniquePe = [];
+  const uniqueCross = [];
+  const uniqueEdge = [];
+  for (let i = 0; i < subscriptions.length; i++) {
+    const subEl = document.getElementById(`${prefix}-sub-subnet-${i}`);
+    const peEl = document.getElementById(`${prefix}-sub-pe-${i}`);
+    const crossEl = document.getElementById(`${prefix}-sub-crosspe-${i}`);
+    const edgeEl = document.getElementById(`${prefix}-sub-rgedge-${i}`);
+    uniqueSubnet.push(subEl ? subEl.checked : false);
+    uniquePe.push(peEl ? peEl.checked : true);
+    uniqueCross.push(crossEl ? crossEl.checked : false);
+    uniqueEdge.push(edgeEl ? parseInt(edgeEl.value) || 4 : 4);
+  }
+
+  args.subnetOptimization = [];
+  args.peOptimization = [];
+  args.crossPeOptimization = [];
+  args.resourceGroupsEdgeLengthListBySubscription = [];
+  for (const idx of templateSubMap) {
+    const si = idx >= 0 ? idx : 0;
+    args.subnetOptimization.push(uniqueSubnet[si] ?? false);
+    args.peOptimization.push(uniquePe[si] ?? true);
+    args.crossPeOptimization.push(uniqueCross[si] ?? false);
+    args.resourceGroupsEdgeLengthListBySubscription.push(uniqueEdge[si] ?? 4);
+  }
 }
 
 function buildCommandString() {
@@ -1034,6 +1141,9 @@ function buildCommandString() {
     if (args.subscriptions) parts.push('--subscriptions', ...args.subscriptions.split(/\s+/));
     if (args.resourcegroups) parts.push('--resourcegroups', ...args.resourcegroups.split(/\s+/));
     if (args.discoverResourceGroups && args.discoverResourceGroups.length > 0) parts.push('--discoverResourceGroups', ...args.discoverResourceGroups);
+  } else if (state.mode === 'terraform') {
+    if (args.terraformRootDirs.length) parts.push('--terraformRootDirs', ...args.terraformRootDirs);
+    if (args.terraformVarFiles.length) parts.push('--terraformVarFiles', ...args.terraformVarFiles);
   } else {
     if (args.bicepFiles.length) parts.push('--bicepFiles', ...args.bicepFiles);
     if (args.parametersFiles.length) parts.push('--parametersFiles', ...args.parametersFiles);
@@ -1101,16 +1211,34 @@ function validate() {
       }
     }
   } else {
-    if (state.bicepFiles.length === 0) {
+    if (state.mode === 'bicep' && state.bicepFiles.length === 0) {
       showToast('Select Bicep template files', 'error');
       return false;
     }
-    if (state.paramFiles.length === 0) {
+    if (state.mode === 'bicep' && state.paramFiles.length === 0) {
       showToast('Select parameter files', 'error');
       return false;
     }
-    if (state.bicepFiles.length !== state.paramFiles.length) {
+    if (state.mode === 'bicep' && state.bicepFiles.length !== state.paramFiles.length) {
       showToast('Bicep & parameter file counts must match', 'error');
+      return false;
+    }
+    if (state.mode === 'terraform' && state.terraformMainFiles.length === 0) {
+      showToast('Select Terraform main.tf files', 'error');
+      return false;
+    }
+    if (
+      state.mode === 'terraform' &&
+      state.terraformVarFiles.length === 0
+    ) {
+      showToast('Select Terraform tfvars files', 'error');
+      return false;
+    }
+    if (
+      state.mode === 'terraform' &&
+      state.terraformMainFiles.length !== state.terraformVarFiles.length
+    ) {
+      showToast('Terraform main.tf and tfvars file counts must match', 'error');
       return false;
     }
   }
@@ -1944,7 +2072,10 @@ const TOUR_STEPS = [
           '<em>Example: You have a production environment with VNets, VMs, and storage — Live mode will query Azure and draw all of them.</em><br><br>' +
           '<strong>Bicep Templates</strong> — Analyzes local <code>.bicep</code> template files offline, without needing Azure access. ' +
           'Use this to visualize what your templates <em>will</em> deploy before actually deploying.<br>' +
-          '<em>Example: You wrote a Bicep template that creates a VNet with subnets and a VM — Bicep mode will diagram those planned resources.</em>',
+          '<em>Example: You wrote a Bicep template that creates a VNet with subnets and a VM — Bicep mode will diagram those planned resources.</em><br><br>' +
+          '<strong>Terraform</strong> — Analyzes local Terraform source offline using a <code>main.tf</code> file and a matching <code>.tfvars</code> file for each stack. ' +
+          'Use this when you want CloudHorus to parse Terraform locally without requiring exported plan JSON or Azure login.<br>' +
+          '<em>Example: You have a network stack and an app stack, each with a <code>main.tf</code> and <code>prod.tfvars</code> — Terraform mode will diagram those planned AzureRM resources.</em>',
     position: 'right'
   },
   // ── Step 3: Authentication ──
@@ -2006,17 +2137,19 @@ const TOUR_STEPS = [
           '💡 <strong>When to disable:</strong> If you want a strictly scoped diagram showing only the RGs you listed, leave this off.',
     position: 'right'
   },
-  // ── Step 7: Bicep Files (shown for context even in Live mode) ──
+  // ── Step 7: Offline Files (shown when an offline mode is selected) ──
   {
     target: '#section-bicep-files',
-    title: '📜 Bicep Template Files',
-    body: '<em>(Only visible when Bicep mode is selected)</em><br><br>' +
-          'In Bicep mode, you provide two types of files:<br><br>' +
-          '<strong>1. Bicep files (.bicep)</strong> — Your infrastructure-as-code templates that define what resources to deploy.<br>' +
-          '<em>Example:</em> <code>main.bicep</code> that defines a VNet, subnets, and a web app.<br><br>' +
-          '<strong>2. Parameter files (.json)</strong> — Configuration values for those templates (names, sizes, regions, etc.).<br>' +
-          '<em>Example:</em> <code>main.parameters.json</code> with <code>{"vnetName": "vnet-prod", "location": "westeurope"}</code><br><br>' +
-          '⚠️ <strong>Important:</strong> The number and order of Bicep files must match the parameter files. File 1 uses Parameter 1, File 2 uses Parameter 2, etc.<br><br>' +
+    title: '📜 Offline Template Files',
+    body: '<em>(Visible when Bicep or Terraform mode is selected)</em><br><br>' +
+          '<strong>Bicep mode</strong> expects two aligned file lists:<br>' +
+          '• <strong>Bicep files (.bicep)</strong> — the infrastructure templates<br>' +
+          '• <strong>Parameter files (.json)</strong> — the values passed into those templates<br><br>' +
+          '<strong>Terraform mode</strong> expects two aligned file lists:<br>' +
+          '• <strong>main.tf files</strong> — one Terraform root entry file per stack<br>' +
+          '• <strong>.tfvars files</strong> — one variable file per <code>main.tf</code>, in the same order<br><br>' +
+          'Terraform mode is <strong>offline</strong>, so Azure login is not required for this flow.<br><br>' +
+          '⚠️ <strong>Important:</strong> The number and order must match. File 1 uses tfvars 1, File 2 uses tfvars 2, and so on.<br><br>' +
           'Drag and drop files or click <strong>browse</strong> to select them.',
     position: 'right'
   },
@@ -2165,8 +2298,8 @@ const TOUR_STEPS = [
     target: '#app-header',
     title: '🦅 You\'re Ready!',
     body: 'That\'s everything! Here\'s a quick checklist to get started:<br><br>' +
-          '1️⃣ Choose <strong>Live Azure</strong> or <strong>Bicep</strong> mode.<br>' +
-          '2️⃣ Enter your scope (Tenants, Subscriptions, Resource Groups) or select Bicep files.<br>' +
+          '1️⃣ Choose <strong>Live Azure</strong>, <strong>Bicep</strong>, or <strong>Terraform</strong> mode.<br>' +
+          '2️⃣ Enter your Azure scope or select the offline files for Bicep/Terraform.<br>' +
           '3️⃣ Optionally enable <strong>Discover Related RGs</strong> to automatically find connected resources.<br>' +
           '4️⃣ Adjust Layout & Optimizations if the default diagram is too dense or sparse.<br>' +
           '5️⃣ Click <strong>Invoke the Guardian</strong> and watch the magic happen!<br><br>' +

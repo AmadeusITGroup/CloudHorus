@@ -1,0 +1,174 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.8.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "module.app.azurerm_service_plan.app",
+          "mode": "managed",
+          "type": "azurerm_service_plan",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "app-plan",
+            "location": "westeurope",
+            "kind": "Linux"
+          }
+        },
+        {
+          "address": "module.app.azurerm_linux_web_app.api",
+          "mode": "managed",
+          "type": "azurerm_linux_web_app",
+          "name": "api",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "api-web",
+            "location": "westeurope",
+            "virtual_network_subnet_id": "/subscriptions/sub-platform-001/resourceGroups/rg-platform-network/providers/Microsoft.Network/virtualNetworks/core-vnet/subnets/app"
+          }
+        },
+        {
+          "address": "module.app.azurerm_private_dns_zone.web",
+          "mode": "managed",
+          "type": "azurerm_private_dns_zone",
+          "name": "web",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "privatelink.azurewebsites.net"
+          }
+        },
+        {
+          "address": "module.app.azurerm_private_dns_zone_virtual_network_link.web_link",
+          "mode": "managed",
+          "type": "azurerm_private_dns_zone_virtual_network_link",
+          "name": "web_link",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "api-vnet-link",
+            "private_dns_zone_name": "privatelink.azurewebsites.net",
+            "virtual_network_id": "/subscriptions/sub-platform-001/resourceGroups/rg-platform-network/providers/Microsoft.Network/virtualNetworks/core-vnet"
+          }
+        },
+        {
+          "address": "module.app.azurerm_private_endpoint.web_pe",
+          "mode": "managed",
+          "type": "azurerm_private_endpoint",
+          "name": "web_pe",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "api-web-pe",
+            "location": "westeurope",
+            "subnet_id": "/subscriptions/sub-platform-001/resourceGroups/rg-platform-network/providers/Microsoft.Network/virtualNetworks/core-vnet/subnets/app",
+            "private_service_connection": []
+          }
+        }
+      ]
+    }
+  },
+  "configuration": {
+    "root_module": {
+      "module_calls": {
+        "app": {
+          "module": {
+            "resources": [
+              {
+                "address": "module.app.azurerm_service_plan.app",
+                "mode": "managed",
+                "type": "azurerm_service_plan",
+                "name": "app",
+                "expressions": {
+                  "name": {
+                    "constant_value": "app-plan"
+                  }
+                }
+              },
+              {
+                "address": "module.app.azurerm_linux_web_app.api",
+                "mode": "managed",
+                "type": "azurerm_linux_web_app",
+                "name": "api",
+                "expressions": {
+                  "service_plan_id": {
+                    "references": [
+                      "module.app.azurerm_service_plan.app.id",
+                      "module.app.azurerm_service_plan.app"
+                    ]
+                  },
+                  "virtual_network_subnet_id": {
+                    "references": [
+                      "var.subnet_id"
+                    ]
+                  }
+                }
+              },
+              {
+                "address": "module.app.azurerm_private_dns_zone.web",
+                "mode": "managed",
+                "type": "azurerm_private_dns_zone",
+                "name": "web",
+                "expressions": {
+                  "name": {
+                    "constant_value": "privatelink.azurewebsites.net"
+                  }
+                }
+              },
+              {
+                "address": "module.app.azurerm_private_dns_zone_virtual_network_link.web_link",
+                "mode": "managed",
+                "type": "azurerm_private_dns_zone_virtual_network_link",
+                "name": "web_link",
+                "expressions": {
+                  "private_dns_zone_name": {
+                    "references": [
+                      "module.app.azurerm_private_dns_zone.web.name",
+                      "module.app.azurerm_private_dns_zone.web"
+                    ]
+                  },
+                  "virtual_network_id": {
+                    "references": [
+                      "var.vnet_id"
+                    ]
+                  }
+                }
+              },
+              {
+                "address": "module.app.azurerm_private_endpoint.web_pe",
+                "mode": "managed",
+                "type": "azurerm_private_endpoint",
+                "name": "web_pe",
+                "expressions": {
+                  "subnet_id": {
+                    "references": [
+                      "var.subnet_id"
+                    ]
+                  },
+                  "private_service_connection": [
+                    {
+                      "private_connection_resource_id": {
+                        "references": [
+                          "module.app.azurerm_linux_web_app.api.id",
+                          "module.app.azurerm_linux_web_app.api"
+                        ]
+                      }
+                    }
+                  ],
+                  "private_dns_zone_group": [
+                    {
+                      "private_dns_zone_ids": {
+                        "references": [
+                          "module.app.azurerm_private_dns_zone.web.id",
+                          "module.app.azurerm_private_dns_zone.web"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

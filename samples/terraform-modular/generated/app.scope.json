@@ -1,0 +1,8 @@
+{
+  "scope": {
+    "provider": "azurerm",
+    "tenant": "tenant-platform-001",
+    "subscription": "sub-platform-001",
+    "resourceGroup": "rg-platform-app"
+  }
+}

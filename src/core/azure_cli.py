@@ -1782,6 +1782,23 @@ class AzureUtility:
         Returns:
             bool: True if registration successful, False otherwise
         """
+        return self.register_local_templates(
+            templates_data=templates_data,
+            resource_groups=resource_groups,
+            subscriptions=subscriptions,
+            tenants=tenants,
+            source_kind="Bicep templates",
+        )
+
+    def register_local_templates(
+        self,
+        templates_data: List[Dict[str, Any]],
+        resource_groups: List[str],
+        subscriptions: List[str],
+        tenants: Optional[List[str]] = None,
+        source_kind: str = "local templates",
+    ) -> bool:
+        """Register local template documents with their corresponding scope mappings."""
         try:
             # Validate input lengths match
             if not (len(templates_data) == len(resource_groups) == len(subscriptions)):
@@ -1822,11 +1839,11 @@ class AzureUtility:
                 self._template_mappings["subscription_to_tenant"][sub] = tenant
                 self._template_mappings["template_index_map"][rg] = i
 
-            self.logger.info(f"Successfully registered {len(templates_data)} Bicep templates with their mappings")
+            self.logger.info(f"Successfully registered {len(templates_data)} {source_kind} with their mappings")
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to register multiple Bicep templates: {str(e)}")
+            self.logger.error(f"Failed to register {source_kind}: {str(e)}")
             return False
 
     def _discover_tenant_for_subscription(self, subscription_id: str) -> Optional[str]:
@@ -2264,6 +2281,17 @@ def register_multiple_bicep_templates(
 ) -> bool:
     """Register multiple Bicep templates with their corresponding resource groups, subscriptions, and tenants."""
     return az_sdk.register_multiple_bicep_templates(templates_data, resource_groups, subscriptions, tenants)
+
+
+def register_local_templates(
+    templates_data: List[Dict[str, Any]],
+    resource_groups: List[str],
+    subscriptions: List[str],
+    tenants: Optional[List[str]] = None,
+    source_kind: str = "local templates",
+) -> bool:
+    """Register local template documents with their corresponding resource groups, subscriptions, and tenants."""
+    return az_sdk.register_local_templates(templates_data, resource_groups, subscriptions, tenants, source_kind)
 
 
 def get_template_data_for_resource_group(resource_group: str) -> Optional[Dict[str, Any]]:

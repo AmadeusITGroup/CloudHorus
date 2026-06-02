@@ -1,0 +1,97 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.8.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "module.network.azurerm_virtual_network.core",
+          "mode": "managed",
+          "type": "azurerm_virtual_network",
+          "name": "core",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "core-vnet",
+            "location": "westeurope",
+            "address_space": [
+              "10.10.0.0/16"
+            ]
+          }
+        },
+        {
+          "address": "module.network.azurerm_network_security_group.app",
+          "mode": "managed",
+          "type": "azurerm_network_security_group",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "app-nsg",
+            "location": "westeurope"
+          }
+        },
+        {
+          "address": "module.network.azurerm_subnet.app",
+          "mode": "managed",
+          "type": "azurerm_subnet",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "app",
+            "virtual_network_name": "core-vnet",
+            "address_prefixes": [
+              "10.10.1.0/24"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "configuration": {
+    "root_module": {
+      "module_calls": {
+        "network": {
+          "module": {
+            "resources": [
+              {
+                "address": "module.network.azurerm_virtual_network.core",
+                "mode": "managed",
+                "type": "azurerm_virtual_network",
+                "name": "core",
+                "expressions": {
+                  "name": {
+                    "constant_value": "core-vnet"
+                  }
+                }
+              },
+              {
+                "address": "module.network.azurerm_network_security_group.app",
+                "mode": "managed",
+                "type": "azurerm_network_security_group",
+                "name": "app",
+                "expressions": {
+                  "name": {
+                    "constant_value": "app-nsg"
+                  }
+                }
+              },
+              {
+                "address": "module.network.azurerm_subnet.app",
+                "mode": "managed",
+                "type": "azurerm_subnet",
+                "name": "app",
+                "expressions": {
+                  "virtual_network_name": {
+                    "references": [
+                      "module.network.azurerm_virtual_network.core.name",
+                      "module.network.azurerm_virtual_network.core"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

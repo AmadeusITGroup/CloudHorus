@@ -32,6 +32,7 @@ from .azure_cli import (
     login_to_tenant,
 )
 from .bicep_builder import build_bicep_template
+from .terraform_builder import TerraformTemplateBuilder, build_terraform_template
 from .resource_processor import get_cross_resource_group_dependencies, get_subnet_implicit_dependencies
 
 logger = SingletonLogger().get_logger()
@@ -955,8 +956,12 @@ def generate_resource_graph(
     discoverResourceGroups=None,
     exportDrawio=False,
     use_local_template=False,
+    local_template_mode=None,
     bicep_files=None,
     parameters_files=None,
+    terraform_json_files=None,
+    terraform_root_dirs=None,
+    terraform_var_files=None,
 ):
     """
     Generate Azure resource graph visualization.
@@ -982,8 +987,12 @@ def generate_resource_graph(
         discoverResourceGroups: List of RG names for which discovery is enabled. Empty list or None = disabled.
         exportDrawio: If True, export the graph to Draw.io XML format in addition to PNG
         use_local_template: If True, use local Bicep template instead of Azure export
+        local_template_mode: Local template input mode (`bicep`, `terraform-json`, `terraform-source`)
         bicep_files: List of paths to Bicep template files (required when use_local_template=True)
         parameters_files: List of paths to parameters files (required when use_local_template=True)
+        terraform_json_files: List of Terraform `show -json` files (required when local_template_mode is `terraform-json`)
+        terraform_root_dirs: List of Terraform working directories (required when local_template_mode is `terraform-source`)
+        terraform_var_files: List of Terraform var files aligned to terraform_root_dirs
     """
     start_time = time.time()
 
@@ -1011,8 +1020,12 @@ def generate_resource_graph(
             discoverResourceGroups,
             exportDrawio,
             use_local_template,
+            local_template_mode,
             bicep_files,
             parameters_files,
+            terraform_json_files,
+            terraform_root_dirs,
+            terraform_var_files,
             start_time,
             _heartbeat,
         )
@@ -1037,58 +1050,114 @@ def _generate_resource_graph_inner(
     discoverResourceGroups,
     exportDrawio,
     use_local_template,
+    local_template_mode,
     bicep_files,
     parameters_files,
+    terraform_json_files,
+    terraform_root_dirs,
+    terraform_var_files,
     start_time,
     _heartbeat,
 ):
     """Inner implementation of generate_resource_graph (wrapped by heartbeat)."""
 
-    # Register Bicep templates FIRST if in local template mode (before any Azure calls)
-    if use_local_template and bicep_files and parameters_files:
-        logger.info(f"Registering {len(bicep_files)} Bicep templates for multiple template support...")
+    # Register local templates FIRST if in offline mode (before any Azure calls)
+    if use_local_template:
+        logger.info("Registering local templates for multiple template support...")
 
         templates_data = []
+        source_kind = "local templates"
 
-        # Build each Bicep template to get ARM JSON
-        for i, (bicep_file, parameters_file) in enumerate(zip(bicep_files, parameters_files)):
-            logger.info(f"Building Bicep template {i+1}/{len(bicep_files)}: {bicep_file}")
-            template_file = build_bicep_template(bicep_file, parameters_file)
-            if not template_file:
-                logger.error(f"Failed to build Bicep template {i+1}: {bicep_file}")
-                return
+        if local_template_mode == "bicep" and bicep_files and parameters_files:
+            source_kind = "Bicep templates"
+            for i, (bicep_file, parameters_file) in enumerate(zip(bicep_files, parameters_files)):
+                logger.info(f"Building Bicep template {i+1}/{len(bicep_files)}: {bicep_file}")
+                template_file = build_bicep_template(bicep_file, parameters_file)
+                if not template_file:
+                    logger.error(f"Failed to build Bicep template {i+1}: {bicep_file}")
+                    return
 
-            # Read the built template
-            try:
-                with open(template_file, "r") as f:
-                    template_data = json.load(f)
-                templates_data.append(template_data)
+                try:
+                    with open(template_file, "r") as f:
+                        template_data = json.load(f)
+                    templates_data.append(template_data)
+                    logger.info(
+                        f"Successfully loaded template {i+1} with {len(template_data.get('resources', []))} resources"
+                    )
+                except Exception as e:
+                    logger.error(f"Error loading template {i+1}: {str(e)}")
+                    return
+        elif local_template_mode == "terraform-json" and terraform_json_files:
+            source_kind = "Terraform JSON files"
+            for i, terraform_json_file in enumerate(terraform_json_files):
                 logger.info(
-                    f"Successfully loaded template {i+1} with {len(template_data.get('resources', []))} resources"
+                    f"Building Terraform template {i+1}/{len(terraform_json_files)} from JSON: {terraform_json_file}"
                 )
-            except Exception as e:
-                logger.error(f"Error loading template {i+1}: {str(e)}")
-                return
+                template_file = build_terraform_template(terraform_json_file)
+                if not template_file:
+                    logger.error(f"Failed to build Terraform template {i+1}: {terraform_json_file}")
+                    return
+
+                try:
+                    with open(template_file, "r") as f:
+                        template_data = json.load(f)
+                    templates_data.append(template_data)
+                    logger.info(
+                        f"Successfully loaded template {i+1} with {len(template_data.get('resources', []))} resources"
+                    )
+                except Exception as e:
+                    logger.error(f"Error loading Terraform template {i+1}: {str(e)}")
+                    return
+        elif local_template_mode == "terraform-source" and terraform_root_dirs:
+            source_kind = "Terraform source directories"
+            terraform_builder = TerraformTemplateBuilder()
+            for i, terraform_root_dir in enumerate(terraform_root_dirs):
+                aligned_var_files: Optional[List[str]] = None
+                if terraform_var_files and i < len(terraform_var_files) and terraform_var_files[i]:
+                    aligned_var_files = [terraform_var_files[i]]
+
+                logger.info(
+                    f"Building Terraform template {i+1}/{len(terraform_root_dirs)} from source: {terraform_root_dir}"
+                )
+                template_file = terraform_builder.build_terraform_source(terraform_root_dir, aligned_var_files)
+                if not template_file:
+                    logger.error(f"Failed to build Terraform source template {i+1}: {terraform_root_dir}")
+                    return
+
+                try:
+                    with open(template_file, "r") as f:
+                        template_data = json.load(f)
+                    templates_data.append(template_data)
+                    logger.info(
+                        f"Successfully loaded template {i+1} with {len(template_data.get('resources', []))} resources"
+                    )
+                except Exception as e:
+                    logger.error(f"Error loading Terraform source template {i+1}: {str(e)}")
+                    return
+        else:
+            logger.error(f"Unsupported or incomplete local template mode: {local_template_mode}")
+            return
 
         # Register all templates with the Azure utility
         try:
-            success = az_sdk.register_multiple_bicep_templates(
+            success = az_sdk.register_local_templates(
                 templates_data=templates_data,
                 resource_groups=resource_groups,
                 subscriptions=subscriptions,
                 tenants=tenants,
+                source_kind=source_kind,
             )
 
             if success:
                 logger.info(
-                    f"Successfully registered {len(templates_data)} Bicep templates with {len(resource_groups)} resource groups"
+                    f"Successfully registered {len(templates_data)} local templates with {len(resource_groups)} resource groups"
                 )
             else:
-                logger.error("Failed to register Bicep templates")
+                logger.error("Failed to register local templates")
                 return
 
         except Exception as e:
-            logger.error(f"Error registering Bicep templates: {str(e)}")
+            logger.error(f"Error registering local templates: {str(e)}")
             return
 
     dot = Digraph(comment="Azure Resources")
@@ -1271,6 +1340,7 @@ def _generate_resource_graph_inner(
                                         rg_index = 0
                                         while rg_index < len(resource_groups):
                                             resourceGroup = resource_groups[rg_index]
+                                            template = None
                                             if use_local_template:
                                                 # Skip resource groups that don't belong to the current subscription
                                                 # (critical for cross-tenant / cross-subscription Bicep scenarios)
@@ -1280,27 +1350,33 @@ def _generate_resource_graph_inner(
                                                     rg_pbar.update(1)
                                                     rg_index += 1
                                                     continue
-                                                # Determine which Bicep template to use for this resource group
-                                                # For multiple templates, we map resource groups to templates by index
-                                                # Each resource group corresponds to a template at the same index
+                                                template = az_sdk.get_template_data_for_resource_group(resourceGroup)
+                                                if template is None and local_template_mode == "bicep" and bicep_files and parameters_files:
+                                                    # Legacy fallback: keep Bicep-only rebuilding behavior if registration did not occur.
+                                                    if rg_index < len(bicep_files):
+                                                        bicep_file = bicep_files[rg_index]
+                                                        parameters_file = parameters_files[rg_index]
+                                                    else:
+                                                        bicep_file = bicep_files[-1]
+                                                        parameters_file = parameters_files[-1]
 
-                                                if rg_index < len(bicep_files):
-                                                    bicep_file = bicep_files[rg_index]
-                                                    parameters_file = parameters_files[rg_index]
-                                                else:
-                                                    # Fallback to last template if we have more RGs than templates
-                                                    bicep_file = bicep_files[-1]
-                                                    parameters_file = parameters_files[-1]
-
-                                                logger.info(
-                                                    f"Building Bicep template {rg_index + 1} for RG '{resourceGroup}': {bicep_file} with parameters: {parameters_file}"
-                                                )
-                                                output_file = build_bicep_template(bicep_file, parameters_file)
-                                                if not output_file:
-                                                    logger.error("Failed to build Bicep template")
+                                                    logger.info(
+                                                        f"Building Bicep template {rg_index + 1} for RG '{resourceGroup}': {bicep_file} with parameters: {parameters_file}"
+                                                    )
+                                                    output_file = build_bicep_template(bicep_file, parameters_file)
+                                                    if not output_file:
+                                                        logger.error("Failed to build Bicep template")
+                                                        rg_pbar.update(1)
+                                                        rg_index += 1
+                                                        continue
+                                                    logger.info(f"Built Bicep template to {output_file}")
+                                                elif template is None:
+                                                    logger.error(
+                                                        f"No registered local template found for resource group {resourceGroup}"
+                                                    )
+                                                    rg_pbar.update(1)
                                                     rg_index += 1
                                                     continue
-                                                logger.info(f"Built Bicep template to {output_file}")
                                             else:
                                                 is_discovered_rg = rg_index >= original_rg_count
                                                 if is_discovered_rg:
@@ -1374,10 +1450,11 @@ def _generate_resource_graph_inner(
 
                                             # Initialize and parse the template variable inside the loop
                                             try:
-                                                with open(output_file, "r") as file:
-                                                    template = json.load(file)
+                                                if template is None:
+                                                    with open(output_file, "r") as file:
+                                                        template = json.load(file)
                                                 logger.info(
-                                                    f'Processing resources in {"Bicep template" if use_local_template else f"resource group {resourceGroup}"}'
+                                                    f'Processing resources in {"local template" if use_local_template else f"resource group {resourceGroup}"}'
                                                 )
                                             except (json.JSONDecodeError, FileNotFoundError) as e:
                                                 logger.error(f"Failed to load template file {output_file}: {e}")
@@ -1390,7 +1467,7 @@ def _generate_resource_graph_inner(
                                             # ── Pre-fetch RG-level data ONCE (avoid redundant API calls per resource) ──
                                             _pre_t0 = time.time()
                                             if use_local_template:
-                                                _cached_rg_location = "Bicep Template"
+                                                _cached_rg_location = "Local Template"
                                             else:
                                                 logger.debug(
                                                     f"[DIAG] PRE-FETCH get_resource_group_location('{resourceGroup}') — once per RG"

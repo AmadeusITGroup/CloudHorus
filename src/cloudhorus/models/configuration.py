@@ -72,8 +72,13 @@ class VisualizationConfig:
 
     # Template mode
     use_local_template: bool = False
+    local_template_mode: Optional[str] = None
     bicep_files: Optional[List[str]] = None
     parameters_files: Optional[List[str]] = None
+    terraform_json_files: Optional[List[str]] = None
+    terraform_root_dirs: Optional[List[str]] = None
+    terraform_var_files: Optional[List[str]] = None
+    scope_metadata_files: Optional[List[str]] = None
 
     def __post_init__(self):
         """Validate and initialize default values."""

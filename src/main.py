@@ -33,6 +33,7 @@ from cloudhorus.services import (  # noqa: E402
     SubnetResolverService,
     TemplateRegistryService,
 )
+from core.local_input_metadata import parse_scope_metadata_files, scope_lists_from_scopes, synthesize_scope_metadata
 from utils.logger import SingletonLogger  # noqa: E402
 from utils.windows_encoding import setup_windows_console  # noqa: E402
 
@@ -63,8 +64,8 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="CloudHorus - Guardian of Azure cloud architecture with the all-seeing eye of Horus. "
         + "Soar above your cloud complexity and survey your infrastructure kingdom with divine clarity. "
-        + "Two flight modes: Live mode (scan active Azure territories) and Template mode (analyze architectural blueprints). "
-        + "Template mode automatically activated when --bicepFiles provided.",
+        + "Offline inputs can come from Bicep blueprints or Terraform JSON plans/states. "
+        + "Template mode automatically activates when any local template input is provided.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -171,6 +172,46 @@ def parse_arguments() -> argparse.Namespace:
         nargs="+",
         default=None,
         help="List of paths to parameters files. Must match the order and number of --bicepFiles.",
+    )
+
+    parser.add_argument(
+        "--terraformJsonFiles",
+        nargs="+",
+        default=None,
+        help=(
+            "List of Terraform `terraform show -json` files. Can be a plan JSON or state JSON. "
+            "When provided, automatically enables Terraform template mode."
+        ),
+    )
+
+    parser.add_argument(
+        "--terraformRootDirs",
+        nargs="+",
+        default=None,
+        help=(
+            "List of Terraform root directories. CloudHorus will run Terraform CLI to build a plan JSON "
+            "before normalizing the input."
+        ),
+    )
+
+    parser.add_argument(
+        "--terraformVarFiles",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of Terraform var files aligned to --terraformRootDirs. "
+            "Provide one var file per Terraform root directory."
+        ),
+    )
+
+    parser.add_argument(
+        "--scopeMetadataFiles",
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of scope metadata JSON files aligned to --terraformJsonFiles or --terraformRootDirs. "
+            "Each file can contain either a top-level `scope` object or the same `_cloudHorus` metadata used by Bicep mode."
+        ),
     )
 
     parser.add_argument(
@@ -357,35 +398,28 @@ def main() -> None:
     exportDrawio = str_to_bool(args.exportDrawio)
 
     # Auto-detect Template mode
-    use_local_template = bool(args.bicepFiles)
+    has_bicep_input = bool(args.bicepFiles)
+    has_terraform_json_input = bool(args.terraformJsonFiles)
+    has_terraform_source_input = bool(args.terraformRootDirs)
+    local_template_modes_selected = sum([has_bicep_input, has_terraform_json_input, has_terraform_source_input])
+
+    if local_template_modes_selected > 1:
+        logger.error(
+            "CloudHorus Error: choose exactly one local input mode: --bicepFiles, --terraformJsonFiles, or --terraformRootDirs."
+        )
+        exit(1)
+
+    use_local_template = local_template_modes_selected > 0
+    local_template_mode = None
+    if has_bicep_input:
+        local_template_mode = "bicep"
+    elif has_terraform_json_input:
+        local_template_mode = "terraform-json"
+    elif has_terraform_source_input:
+        local_template_mode = "terraform-source"
 
     if use_local_template:
         logger.info("CloudHorus: Template mode detected - analyzing architectural blueprints")
-
-        # Validate Bicep files and parameters
-        if not args.parametersFiles:
-            logger.error("CloudHorus Error: --parametersFiles required when examining --bicepFiles blueprints")
-            exit(1)
-
-        if len(args.bicepFiles) != len(args.parametersFiles):
-            logger.error(
-                f"CloudHorus Error: Blueprint count ({len(args.bicepFiles)}) must match parameters count ({len(args.parametersFiles)})"
-            )
-            exit(1)
-
-        # Validate all files exist
-        for i, (bicep_file, params_file) in enumerate(zip(args.bicepFiles, args.parametersFiles)):
-            if not os.path.exists(bicep_file):
-                logger.error(f"CloudHorus Error: Blueprint {i+1} not found in realm: {bicep_file}")
-                exit(1)
-
-            if not os.path.exists(params_file):
-                logger.error(f"CloudHorus Error: Parameters scroll {i+1} missing: {params_file}")
-                exit(1)
-
-        logger.info(f"CloudHorus: Divine sight locked onto {len(args.bicepFiles)} architectural blueprint(s)")
-        for i, (bicep_file, params_file) in enumerate(zip(args.bicepFiles, args.parametersFiles)):
-            logger.info(f"  Blueprint {i+1}: {bicep_file} with parameters {params_file}")
 
         # Check if user provided subscription/tenant/resourcegroup arguments in Template mode
         if args.subscriptions is not None:
@@ -400,48 +434,103 @@ def main() -> None:
             logger.error("CloudHorus Error: --resourcegroups not allowed in Template mode.")
             exit(1)
 
-        # Derive tenant / subscription / resource-group per template.
-        # Each parameters file may contain an optional "_cloudHorus" metadata
-        # block that declares the Azure scope for that template:
-        #   "_cloudHorus": {
-        #       "tenant": "<tenant-id>",
-        #       "subscription": "<subscription-id>",
-        #       "resourceGroup": "<rg-name>"
-        #   }
-        # When present the values override the synthetic defaults, enabling
-        # cross-tenant and cross-subscription Bicep scenarios.
-        num_templates = len(args.bicepFiles)
-        args.subscriptions = []
-        args.tenants = []
-        args.resourcegroups = []
+        template_count = 0
+        scope_sources: Optional[List[str]] = None
+        if local_template_mode == "bicep":
+            if not args.parametersFiles:
+                logger.error("CloudHorus Error: --parametersFiles required when examining --bicepFiles blueprints")
+                exit(1)
 
-        has_custom_metadata = False
-        for i, params_file in enumerate(args.parametersFiles):
-            try:
-                with open(params_file, "r") as f:
-                    params_data = json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Could not read parameters file {params_file} for metadata: {e}")
-                params_data = {}
+            if len(args.bicepFiles) != len(args.parametersFiles):
+                logger.error(
+                    f"CloudHorus Error: Blueprint count ({len(args.bicepFiles)}) must match parameters count ({len(args.parametersFiles)})"
+                )
+                exit(1)
 
-            meta = params_data.get("_cloudHorus", {})
-            tenant = meta.get("tenant", "cloudhorus-tenant")
-            subscription = meta.get("subscription", "cloudhorus-subscription")
-            resource_group = meta.get("resourceGroup", f"cloudhorus-rg-{i+1}")
+            for i, (bicep_file, params_file) in enumerate(zip(args.bicepFiles, args.parametersFiles)):
+                if not os.path.exists(bicep_file):
+                    logger.error(f"CloudHorus Error: Blueprint {i+1} not found in realm: {bicep_file}")
+                    exit(1)
 
-            if meta:
-                has_custom_metadata = True
+                if not os.path.exists(params_file):
+                    logger.error(f"CloudHorus Error: Parameters scroll {i+1} missing: {params_file}")
+                    exit(1)
 
-            args.tenants.append(tenant)
-            args.subscriptions.append(subscription)
-            args.resourcegroups.append(resource_group)
+            template_count = len(args.bicepFiles)
+            scope_sources = args.parametersFiles
+            logger.info(f"CloudHorus: Divine sight locked onto {template_count} architectural blueprint(s)")
+            for i, (bicep_file, params_file) in enumerate(zip(args.bicepFiles, args.parametersFiles)):
+                logger.info(f"  Blueprint {i+1}: {bicep_file} with parameters {params_file}")
+        elif local_template_mode == "terraform-json":
+            template_count = len(args.terraformJsonFiles)
+            for i, terraform_json_file in enumerate(args.terraformJsonFiles):
+                if not os.path.exists(terraform_json_file):
+                    logger.error(f"CloudHorus Error: Terraform JSON {i+1} not found in realm: {terraform_json_file}")
+                    exit(1)
+            if args.scopeMetadataFiles and len(args.scopeMetadataFiles) != template_count:
+                logger.error(
+                    "CloudHorus Error: --scopeMetadataFiles count must match --terraformJsonFiles count."
+                )
+                exit(1)
+            if args.scopeMetadataFiles:
+                for metadata_file in args.scopeMetadataFiles:
+                    if not os.path.exists(metadata_file):
+                        logger.error(f"CloudHorus Error: Scope metadata file missing: {metadata_file}")
+                        exit(1)
+            scope_sources = args.scopeMetadataFiles
+            logger.info(f"CloudHorus: Divine sight locked onto {template_count} Terraform JSON input(s)")
+            for i, terraform_json_file in enumerate(args.terraformJsonFiles):
+                logger.info(f"  Terraform JSON {i+1}: {terraform_json_file}")
+        elif local_template_mode == "terraform-source":
+            template_count = len(args.terraformRootDirs)
+            for i, terraform_root_dir in enumerate(args.terraformRootDirs):
+                if not os.path.isdir(terraform_root_dir):
+                    logger.error(
+                        f"CloudHorus Error: Terraform root directory {i+1} not found in realm: {terraform_root_dir}"
+                    )
+                    exit(1)
+            if args.terraformVarFiles and len(args.terraformVarFiles) != template_count:
+                logger.error("CloudHorus Error: --terraformVarFiles count must match --terraformRootDirs count.")
+                exit(1)
+            if args.terraformVarFiles:
+                for var_file in args.terraformVarFiles:
+                    if not os.path.exists(var_file):
+                        logger.error(f"CloudHorus Error: Terraform var file missing: {var_file}")
+                        exit(1)
+            if args.scopeMetadataFiles and len(args.scopeMetadataFiles) != template_count:
+                logger.error(
+                    "CloudHorus Error: --scopeMetadataFiles count must match --terraformRootDirs count."
+                )
+                exit(1)
+            if args.scopeMetadataFiles:
+                for metadata_file in args.scopeMetadataFiles:
+                    if not os.path.exists(metadata_file):
+                        logger.error(f"CloudHorus Error: Scope metadata file missing: {metadata_file}")
+                        exit(1)
+            scope_sources = args.scopeMetadataFiles
+            logger.info(f"CloudHorus: Divine sight locked onto {template_count} Terraform source root(s)")
+            for i, terraform_root_dir in enumerate(args.terraformRootDirs):
+                logger.info(f"  Terraform root {i+1}: {terraform_root_dir}")
 
-        if has_custom_metadata:
-            logger.info(f"CloudHorus: Custom scope metadata detected in parameters files")
+        if scope_sources:
+            parsed_scope = parse_scope_metadata_files(scope_sources)
+            if parsed_scope["errors"]:
+                for error in parsed_scope["errors"]:
+                    logger.error(f"CloudHorus Error: {error}")
+                exit(1)
+            scopes = parsed_scope["scopes"]
+            logger.info("CloudHorus: Custom scope metadata detected in local input files")
+        else:
+            scopes = synthesize_scope_metadata(template_count)
 
-        unique_tenants = list(dict.fromkeys(args.tenants))  # preserve order, deduplicate
+        scope_lists = scope_lists_from_scopes(scopes)
+        args.tenants = scope_lists["tenants"]
+        args.subscriptions = scope_lists["subscriptions"]
+        args.resourcegroups = scope_lists["resourcegroups"]
+
+        unique_tenants = list(dict.fromkeys(args.tenants))
         unique_subs = list(dict.fromkeys(args.subscriptions))
-        logger.info(f"CloudHorus: Divine realm configured for {num_templates} blueprint(s)")
+        logger.info(f"CloudHorus: Divine realm configured for {template_count} local input(s)")
         logger.info(f"  Tenants ({len(unique_tenants)}): {', '.join(unique_tenants)}")
         logger.info(f"  Subscriptions ({len(unique_subs)}): {', '.join(unique_subs)}")
         logger.info(f"  Resource groups: {', '.join(args.resourcegroups)}")
@@ -530,8 +619,13 @@ def main() -> None:
         discover_resource_groups=discoverResourceGroups,
         export_drawio=exportDrawio,
         use_local_template=use_local_template,
-        bicep_files=args.bicepFiles if use_local_template else None,
-        parameters_files=args.parametersFiles if use_local_template else None,
+        local_template_mode=local_template_mode,
+        bicep_files=args.bicepFiles if local_template_mode == "bicep" else None,
+        parameters_files=args.parametersFiles if local_template_mode == "bicep" else None,
+        terraform_json_files=args.terraformJsonFiles if local_template_mode == "terraform-json" else None,
+        terraform_root_dirs=args.terraformRootDirs if local_template_mode == "terraform-source" else None,
+        terraform_var_files=args.terraformVarFiles if local_template_mode == "terraform-source" else None,
+        scope_metadata_files=args.scopeMetadataFiles if use_local_template else None,
     )
 
     # Initialize services with dependency injection
@@ -608,8 +702,12 @@ def main() -> None:
         subscriptions=config.subscriptions,
         resource_groups=config.resource_groups,
         use_bicep_templates=config.use_local_template,
+        local_template_mode=config.local_template_mode,
         bicep_files=config.bicep_files,
         parameters_files=config.parameters_files,
+        terraform_json_files=config.terraform_json_files,
+        terraform_root_dirs=config.terraform_root_dirs,
+        terraform_var_files=config.terraform_var_files,
     )
 
     if png_path is None:
