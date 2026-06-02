@@ -33,7 +33,12 @@ from cloudhorus.services import (  # noqa: E402
     SubnetResolverService,
     TemplateRegistryService,
 )
-from core.local_input_metadata import parse_scope_metadata_files, scope_lists_from_scopes, synthesize_scope_metadata
+from core.local_input_metadata import (
+    discover_terraform_source_scope_metadata,
+    parse_scope_metadata_files,
+    scope_lists_from_scopes,
+    synthesize_scope_metadata,
+)
 from utils.logger import SingletonLogger  # noqa: E402
 from utils.windows_encoding import setup_windows_console  # noqa: E402
 
@@ -508,6 +513,15 @@ def main() -> None:
                         logger.error(f"CloudHorus Error: Scope metadata file missing: {metadata_file}")
                         exit(1)
             scope_sources = args.scopeMetadataFiles
+            if not scope_sources:
+                discovered_scope = discover_terraform_source_scope_metadata(args.terraformRootDirs)
+                if discovered_scope["errors"]:
+                    for error in discovered_scope["errors"]:
+                        logger.error(f"CloudHorus Error: {error}")
+                    exit(1)
+                if discovered_scope["allFound"]:
+                    scope_sources = discovered_scope["files"]
+                    logger.info("CloudHorus: Auto-discovered scope metadata for Terraform source roots")
             logger.info(f"CloudHorus: Divine sight locked onto {template_count} Terraform source root(s)")
             for i, terraform_root_dir in enumerate(args.terraformRootDirs):
                 logger.info(f"  Terraform root {i+1}: {terraform_root_dir}")

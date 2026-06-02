@@ -94,6 +94,14 @@ def test_terraform_builder_normalizes_azurerm_resources() -> None:
 
     vnet = resources["Microsoft.Network/virtualNetworks:core-vnet"]
     assert vnet["properties"]["addressSpace"]["addressPrefixes"] == ["10.10.0.0/16"]
+    assert vnet["properties"]["subnets"] == [
+        {
+            "name": "app",
+            "properties": {
+                "addressPrefix": "10.10.1.0/24",
+            },
+        }
+    ]
 
     subnet = resources["Microsoft.Network/virtualNetworks/subnets:core-vnet/app"]
     assert subnet["properties"]["addressPrefix"] == "10.10.1.0/24"
@@ -105,3 +113,107 @@ def test_terraform_builder_normalizes_azurerm_resources() -> None:
     assert web_app["dependsOn"] == [
         "[resourceId('Microsoft.Network/virtualNetworks/subnets', 'core-vnet', 'app')]"
     ]
+
+
+def test_terraform_builder_maps_aks_and_sql_resources() -> None:
+    """Terraform JSON should preserve AKS subnet integration and Azure SQL server types."""
+    builder = TerraformTemplateBuilder()
+
+    terraform_plan = {
+        "format_version": "1.0",
+        "terraform_version": "1.8.5",
+        "planned_values": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "azurerm_subnet.aks",
+                        "mode": "managed",
+                        "type": "azurerm_subnet",
+                        "name": "aks",
+                        "provider_name": "registry.terraform.io/hashicorp/azurerm",
+                        "values": {
+                            "name": "aks_subnet",
+                            "virtual_network_name": "test-vnet-01",
+                            "address_prefixes": ["10.0.4.0/23"],
+                        },
+                    },
+                    {
+                        "address": "azurerm_kubernetes_cluster.aks",
+                        "mode": "managed",
+                        "type": "azurerm_kubernetes_cluster",
+                        "name": "aks",
+                        "provider_name": "registry.terraform.io/hashicorp/azurerm",
+                        "values": {
+                            "name": "test-aks-01",
+                            "location": "westeurope",
+                            "default_node_pool": [
+                                {
+                                    "name": "nodepool1",
+                                    "vnet_subnet_id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', 'test-vnet-01', 'aks_subnet')]",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "address": "azurerm_mssql_server.sql",
+                        "mode": "managed",
+                        "type": "azurerm_mssql_server",
+                        "name": "sql",
+                        "provider_name": "registry.terraform.io/hashicorp/azurerm",
+                        "values": {
+                            "name": "test-sql-data",
+                            "location": "westeurope",
+                        },
+                    },
+                ]
+            }
+        },
+        "configuration": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "azurerm_subnet.aks",
+                        "expressions": {
+                            "virtual_network_name": {
+                                "constant_value": "test-vnet-01",
+                            }
+                        },
+                    },
+                    {
+                        "address": "azurerm_kubernetes_cluster.aks",
+                        "expressions": {
+                            "default_node_pool": [
+                                {
+                                    "vnet_subnet_id": {
+                                        "references": [
+                                            "azurerm_subnet.aks.id",
+                                            "azurerm_subnet.aks",
+                                        ]
+                                    }
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "address": "azurerm_mssql_server.sql",
+                        "expressions": {
+                            "name": {"constant_value": "test-sql-data"},
+                        },
+                    },
+                ]
+            }
+        },
+    }
+
+    document = builder.build_document_from_json(terraform_plan)
+    template = document.to_renderer_template()
+
+    resources = {resource["type"] + ":" + resource["name"]: resource for resource in template["resources"]}
+
+    aks = resources["Microsoft.ContainerService/managedClusters:test-aks-01"]
+    assert aks["properties"]["agentPoolProfiles"][0]["vnetSubnetID"] == (
+        "[resourceId('Microsoft.Network/virtualNetworks/subnets', 'test-vnet-01', 'aks_subnet')]"
+    )
+
+    sql = resources["Microsoft.Sql/servers:test-sql-data"]
+    assert sql["type"] == "Microsoft.Sql/servers"

@@ -37,6 +37,7 @@ _TERRAFORM_TO_RENDERER_TYPE = {
     "azurerm_redis_cache": "Microsoft.Cache/Redis",
     "azurerm_route_table": "Microsoft.Network/routeTables",
     "azurerm_service_plan": "Microsoft.Web/serverfarms",
+    "azurerm_mssql_server": "Microsoft.Sql/servers",
     "azurerm_storage_account": "Microsoft.Storage/storageAccounts",
     "azurerm_subnet": "Microsoft.Network/virtualNetworks/subnets",
     "azurerm_virtual_network": "Microsoft.Network/virtualNetworks",
@@ -153,6 +154,8 @@ class TerraformTemplateBuilder:
             references = self._collect_dependency_references(config_resource)
             resource.depends_on = self._references_to_depends_on(references, address_index, resource.address)
             self._populate_reference_backed_properties(resource, config_resource, address_index)
+
+        self._attach_subnets_to_virtual_networks(normalized_resources)
 
         return LocalTemplateDocument(
             source_format=source_format,
@@ -616,6 +619,26 @@ class TerraformTemplateBuilder:
                 properties["virtualNetworkSubnetId"] = subnet_id
             return properties
 
+        if terraform_type == "azurerm_kubernetes_cluster":
+            properties = {}
+            agent_pool_profiles = []
+            for pool in self._as_sequence(values.get("default_node_pool")):
+                if not isinstance(pool, dict):
+                    continue
+                subnet_id = pool.get("vnet_subnet_id")
+                if not subnet_id:
+                    continue
+                agent_pool_profile = {
+                    "name": pool.get("name", "nodepool1"),
+                    "vnetSubnetID": subnet_id,
+                }
+                if pool.get("type"):
+                    agent_pool_profile["type"] = pool.get("type")
+                agent_pool_profiles.append(agent_pool_profile)
+            if agent_pool_profiles:
+                properties["agentPoolProfiles"] = agent_pool_profiles
+            return properties
+
         if terraform_type == "azurerm_private_endpoint":
             properties = {}
             subnet_id = values.get("subnet_id")
@@ -729,6 +752,16 @@ class TerraformTemplateBuilder:
             if resource_id:
                 resource.properties["virtualNetworkSubnetId"] = resource_id
 
+        if resource.renderer_type == "Microsoft.ContainerService/managedClusters" and not resource.properties.get(
+            "agentPoolProfiles"
+        ):
+            subnet_reference = self._first_reference_for_path(config_resource, "default_node_pool", "vnet_subnet_id")
+            subnet_resource_id = self._reference_to_resource_id(subnet_reference, address_index)
+            if subnet_resource_id:
+                resource.properties["agentPoolProfiles"] = [
+                    {"name": "nodepool1", "vnetSubnetID": subnet_resource_id}
+                ]
+
         if resource.renderer_type == "Microsoft.Network/privateEndpoints":
             subnet_reference = self._first_reference_for_path(config_resource, "subnet_id")
             subnet_resource_id = self._reference_to_resource_id(subnet_reference, address_index)
@@ -811,6 +844,45 @@ class TerraformTemplateBuilder:
         if quoted_name_parts:
             return f"[resourceId('{renderer_type}', {quoted_name_parts})]"
         return f"[resourceId('{renderer_type}')]"
+
+    def _as_sequence(self, value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _attach_subnets_to_virtual_networks(self, resources: List[LocalTemplateResource]) -> None:
+        vnet_index = {
+            resource.name: resource
+            for resource in resources
+            if resource.renderer_type == "Microsoft.Network/virtualNetworks"
+        }
+        if not vnet_index:
+            return
+
+        for resource in resources:
+            if resource.renderer_type != "Microsoft.Network/virtualNetworks/subnets":
+                continue
+
+            vnet_name, _, subnet_name = resource.name.partition("/")
+            if not vnet_name or not subnet_name:
+                continue
+
+            vnet_resource = vnet_index.get(vnet_name)
+            if vnet_resource is None:
+                continue
+
+            subnet_entries = vnet_resource.properties.setdefault("subnets", [])
+            if any(isinstance(entry, dict) and entry.get("name") == subnet_name for entry in subnet_entries):
+                continue
+
+            subnet_entries.append(
+                {
+                    "name": subnet_name,
+                    "properties": dict(resource.properties),
+                }
+            )
 
 
 def build_terraform_template(terraform_json_file: str, output_file: Optional[str] = None) -> Optional[str]:

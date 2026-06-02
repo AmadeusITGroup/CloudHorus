@@ -286,6 +286,12 @@
             <p>Select matching Terraform variable files ending in <code>.tfvars</code> or <button type="button" class="link-btn" onclick="pickTerraformVarFiles()">browse</button><span class="info-icon" data-tooltip="Select one .tfvars file per Terraform stack. The number and order must match the selected main.tf files so each stack receives the correct variables."><i class="fas fa-info-circle"></i></span></p>
             <div class="file-list" id="file-list-terraform-vars"></div>
           </div>
+
+          <div id="terraform-per-sub-options" class="per-sub-container hidden" style="margin-top:16px">
+            <h3 class="subsection-title"><i class="fas fa-sliders-h"></i> Per-Subscription Settings</h3>
+            <p class="hint-text">Auto-derived from Terraform scope metadata when a stack includes <code>scope.json</code>, <code>cloudhorus.scope.json</code>, <code>&lt;stack&gt;.scope.json</code>, or a sibling <code>metadata/&lt;stack&gt;.scope.json</code>.</p>
+            <div id="terraform-per-sub-grid"></div>
+          </div>
         </section>
 
         <!-- Layout Settings -->

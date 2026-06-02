@@ -24,7 +24,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 import webview
-from core.local_input_metadata import parse_scope_metadata_files
+from core.local_input_metadata import discover_terraform_source_scope_metadata, parse_scope_metadata_files
 
 # ─── Constants ───────────────────────────────────────────────────────────
 WEBUI_DIR = os.path.join(PROJECT_ROOT, "webui")
@@ -134,6 +134,10 @@ class CloudHorusAPI:
     def parse_scope_metadata(self, file_paths: List[str]) -> Dict[str, Any]:
         """Parse explicit scope metadata files for Terraform JSON inputs."""
         return parse_scope_metadata_files(file_paths)
+
+    def discover_terraform_source_metadata(self, terraform_root_dirs: List[str]) -> Dict[str, Any]:
+        """Auto-discover Terraform scope metadata files for selected root directories."""
+        return discover_terraform_source_scope_metadata(terraform_root_dirs)
 
     # ─── Generation ──────────────────────────────────────────────────
 
@@ -375,6 +379,10 @@ class CloudHorusAPI:
                 cmd.extend(["--bicepFiles"] + bicep_files)
             if param_files:
                 cmd.extend(["--parametersFiles"] + param_files)
+
+        scope_metadata_files = args.get("scopeMetadataFiles", [])
+        if scope_metadata_files:
+            cmd.extend(["--scopeMetadataFiles"] + scope_metadata_files)
 
         # Layout parameters
         cmd.extend(["--edgeDirection", args.get("edgeDirection", "TB")])

@@ -1,7 +1,8 @@
 """Helpers for parsing local input scope metadata across offline modes."""
 
 import json
-from typing import Any, Dict, List
+import os
+from typing import Any, Dict, List, Optional
 
 DEFAULT_PROVIDER = "azurerm"
 DEFAULT_SUBSCRIPTION = "cloudhorus-subscription"
@@ -73,6 +74,45 @@ def parse_scope_metadata_files(file_paths: List[str], provider: str = DEFAULT_PR
     }
 
 
+def discover_terraform_source_scope_metadata(
+    terraform_root_dirs: List[str], provider: str = DEFAULT_PROVIDER
+) -> Dict[str, Any]:
+    """Discover Terraform scope metadata files using a few common colocated naming conventions.
+
+    This keeps Terraform source mode close to the Bicep experience: if each root has a
+    nearby scope metadata file, CloudHorus can pick it up automatically without a separate picker.
+    """
+    discovered_files: List[str] = []
+    missing_roots: List[str] = []
+
+    for terraform_root_dir in terraform_root_dirs:
+        metadata_file = _discover_terraform_scope_file(terraform_root_dir)
+        if metadata_file:
+            discovered_files.append(metadata_file)
+        else:
+            missing_roots.append(terraform_root_dir)
+
+    if len(discovered_files) != len(terraform_root_dirs):
+        return {
+            "files": discovered_files,
+            "missingRoots": missing_roots,
+            "allFound": False,
+            "subscriptions": [],
+            "templateSubMap": [],
+            "errors": [],
+        }
+
+    parsed = parse_scope_metadata_files(discovered_files, provider)
+    return {
+        "files": discovered_files,
+        "missingRoots": missing_roots,
+        "allFound": not parsed["errors"],
+        "subscriptions": parsed["subscriptions"],
+        "templateSubMap": parsed["templateSubMap"],
+        "errors": parsed["errors"],
+    }
+
+
 def scope_lists_from_scopes(scopes: List[Dict[str, str]]) -> Dict[str, List[str]]:
     """Convert parsed scope metadata into argument lists used by the renderer."""
     return {
@@ -94,3 +134,23 @@ def _extract_scope_metadata(data: Dict[str, Any], index: int, provider: str) -> 
         "tenant": str(scope_source.get("tenant", DEFAULT_TENANT)),
         "resourceGroup": str(scope_source.get("resourceGroup", f"cloudhorus-rg-{index + 1}")),
     }
+
+
+def _discover_terraform_scope_file(terraform_root_dir: str) -> Optional[str]:
+    root_dir = os.path.abspath(terraform_root_dir)
+    root_name = os.path.basename(os.path.normpath(root_dir))
+    parent_dir = os.path.dirname(root_dir)
+
+    candidates = [
+        os.path.join(root_dir, "cloudhorus.scope.json"),
+        os.path.join(root_dir, "scope.json"),
+        os.path.join(root_dir, f"{root_name}.scope.json"),
+        os.path.join(parent_dir, f"{root_name}.scope.json"),
+        os.path.join(parent_dir, "metadata", f"{root_name}.scope.json"),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return None

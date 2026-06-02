@@ -1,0 +1,8 @@
+{
+  "scope": {
+    "provider": "azurerm",
+    "tenant": "test-tenant-1",
+    "subscription": "test-sub-1",
+    "resourceGroup": "test-rg-network"
+  }
+}

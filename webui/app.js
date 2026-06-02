@@ -25,8 +25,11 @@ const state = {
   paramFiles: [],
   terraformMainFiles: [],
   terraformVarFiles: [],
+  terraformScopeMetadataFiles: [],
   bicepSubscriptions: [],  // parsed from _cloudHorus metadata
+  terraformSubscriptions: [],
   templateSubMap: [],       // maps each template index -> unique subscription index
+  terraformTemplateSubMap: [],
   running: false,
   lastGeneratedFile: null,
   theme: 'light',
@@ -831,6 +834,7 @@ async function pickTerraformMainFiles() {
       const rejected = files.length - accepted.length;
       state.terraformMainFiles = mergeUniqueFiles(state.terraformMainFiles, accepted);
       renderFileChips('terraform-main');
+      await refreshTerraformSourceMetadata();
       refreshPreview();
       if (rejected > 0) {
         showToast('Terraform mode only accepts files named main.tf', 'warning');
@@ -851,6 +855,7 @@ async function pickTerraformVarFiles() {
       const rejected = files.length - accepted.length;
       state.terraformVarFiles = mergeUniqueFiles(state.terraformVarFiles, accepted);
       renderFileChips('terraform-vars');
+      await refreshTerraformSourceMetadata();
       refreshPreview();
       if (rejected > 0) {
         showToast('Terraform mode only accepts files ending in .tfvars', 'warning');
@@ -906,6 +911,50 @@ function renderBicepPerSubControls() {
     gridId: 'bicep-per-sub-grid',
     subscriptions: state.bicepSubscriptions,
     prefix: 'bicep'
+  });
+}
+
+async function refreshTerraformSourceMetadata() {
+  const a = api();
+  const terraformRootDirs = terraformRootDirsFromMainFiles(state.terraformMainFiles);
+  if (!a || terraformRootDirs.length === 0) {
+    state.terraformScopeMetadataFiles = [];
+    state.terraformSubscriptions = [];
+    state.terraformTemplateSubMap = [];
+    renderTerraformPerSubControls();
+    return;
+  }
+
+  try {
+    const result = await a.discover_terraform_source_metadata(terraformRootDirs);
+    if (result.errors && result.errors.length > 0) {
+      result.errors.forEach(err => showToast(err, 'warning'));
+    }
+    if (result.allFound) {
+      state.terraformScopeMetadataFiles = result.files || [];
+      state.terraformSubscriptions = result.subscriptions || [];
+      state.terraformTemplateSubMap = result.templateSubMap || [];
+    } else {
+      state.terraformScopeMetadataFiles = [];
+      state.terraformSubscriptions = [];
+      state.terraformTemplateSubMap = [];
+    }
+  } catch (e) {
+    state.terraformScopeMetadataFiles = [];
+    state.terraformSubscriptions = [];
+    state.terraformTemplateSubMap = [];
+    showToast('Failed to auto-discover Terraform scope metadata', 'error');
+  }
+
+  renderTerraformPerSubControls();
+}
+
+function renderTerraformPerSubControls() {
+  renderOfflinePerSubControls({
+    containerId: 'terraform-per-sub-options',
+    gridId: 'terraform-per-sub-grid',
+    subscriptions: state.terraformSubscriptions,
+    prefix: 'terraform'
   });
 }
 
@@ -993,17 +1042,19 @@ function renderFileChips(type) {
   }).join('');
 }
 
-function removeFile(type, index) {
+async function removeFile(type, index) {
   if (type === 'bicep') {
     state.bicepFiles.splice(index, 1);
   } else if (type === 'params') {
     state.paramFiles.splice(index, 1);
     // Re-parse metadata after removing a param file
-    parseBicepParamsMetadata();
+    await parseBicepParamsMetadata();
   } else if (type === 'terraform-main') {
     state.terraformMainFiles.splice(index, 1);
+    await refreshTerraformSourceMetadata();
   } else {
     state.terraformVarFiles.splice(index, 1);
+    await refreshTerraformSourceMetadata();
   }
   renderFileChips(type);
   refreshPreview();
@@ -1059,6 +1110,7 @@ function buildCommandArgs() {
   } else if (state.mode === 'terraform') {
     args.terraformRootDirs = terraformRootDirsFromMainFiles(state.terraformMainFiles);
     args.terraformVarFiles = state.terraformVarFiles;
+    args.scopeMetadataFiles = state.terraformScopeMetadataFiles;
   } else {
     args.bicepFiles = state.bicepFiles;
     args.parametersFiles = state.paramFiles;
@@ -1092,6 +1144,8 @@ function buildCommandArgs() {
     }
   } else if (state.mode === 'bicep') {
     applyOfflinePerSubscriptionArgs(args, state.bicepSubscriptions, state.templateSubMap, 'bicep');
+  } else if (state.mode === 'terraform') {
+    applyOfflinePerSubscriptionArgs(args, state.terraformSubscriptions, state.terraformTemplateSubMap, 'terraform');
   }
 
   return args;
@@ -1144,6 +1198,9 @@ function buildCommandString() {
   } else if (state.mode === 'terraform') {
     if (args.terraformRootDirs.length) parts.push('--terraformRootDirs', ...args.terraformRootDirs);
     if (args.terraformVarFiles.length) parts.push('--terraformVarFiles', ...args.terraformVarFiles);
+    if (args.scopeMetadataFiles && args.scopeMetadataFiles.length) {
+      parts.push('--scopeMetadataFiles', ...args.scopeMetadataFiles);
+    }
   } else {
     if (args.bicepFiles.length) parts.push('--bicepFiles', ...args.bicepFiles);
     if (args.parametersFiles.length) parts.push('--parametersFiles', ...args.parametersFiles);

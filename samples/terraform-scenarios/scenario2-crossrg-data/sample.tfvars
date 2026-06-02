@@ -1,0 +1,5 @@
+location             = "westeurope"
+resource_group_name  = "test-rg-data"
+sql_server_name      = "test-sql-data"
+sql_admin_password   = "CloudHorus123!"
+storage_account_name = "testdatastorage01"

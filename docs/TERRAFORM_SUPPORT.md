@@ -200,6 +200,35 @@ Use this when:
 - You want CloudHorus to render them in separate synthesized resource groups by default
 - You want the same file-pairing flow used by the desktop UI
 
+When a Terraform root includes adjacent scope metadata, CloudHorus now picks it up automatically in both CLI and Web UI. Supported conventions are:
+
+- `scope.json` inside the Terraform root
+- `cloudhorus.scope.json` inside the Terraform root
+- `<stack-directory>.scope.json` inside the Terraform root
+- `<stack-directory>.scope.json` in a sibling `metadata/` directory
+
+### Example 2a: Scenario 2 Cross-RG Parity Sample
+
+This bundled source sample mirrors `samples/bicep-scenarios/scenario2-crossrg-*` with the same tenant, subscription, and three resource groups.
+
+```bash
+python3 src/main.py \
+  --terraformRootDirs \
+    ./samples/terraform-scenarios/scenario2-crossrg-network \
+    ./samples/terraform-scenarios/scenario2-crossrg-app \
+    ./samples/terraform-scenarios/scenario2-crossrg-data \
+  --terraformVarFiles \
+    ./samples/terraform-scenarios/scenario2-crossrg-network/sample.tfvars \
+    ./samples/terraform-scenarios/scenario2-crossrg-app/sample.tfvars \
+    ./samples/terraform-scenarios/scenario2-crossrg-data/sample.tfvars \
+  --scopeMetadataFiles \
+    ./samples/terraform-scenarios/metadata/scenario2-crossrg-network.scope.json \
+    ./samples/terraform-scenarios/metadata/scenario2-crossrg-app.scope.json \
+    ./samples/terraform-scenarios/metadata/scenario2-crossrg-data.scope.json
+```
+
+Use this when you want Terraform source mode to exercise the same cross-RG network, app, private endpoint, SQL, and AKS relationships as the Bicep Scenario 2 QA sample.
+
 ## Example 3: Terraform JSON Files
 
 JSON mode remains available for advanced/manual CLI workflows.
