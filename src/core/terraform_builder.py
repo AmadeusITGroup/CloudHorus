@@ -9,17 +9,28 @@ import os
 import re
 import subprocess
 import tempfile
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import hcl2
 
 from cloudhorus.models.local_template_document import LocalTemplateDocument, LocalTemplateResource
+from core.plan_diff import (
+    UNCHANGED_CATEGORY,
+    ChangeExtractor,
+    ChangeFilter,
+    ChangeModel,
+    parse_change_types,
+)
 from utils.logger import SingletonLogger
 
 logger = SingletonLogger().get_logger()
 
 _SUPPORTED_PROVIDER_NAMES = {"azurerm", "registry.terraform.io/hashicorp/azurerm"}
 _REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+# Literal written in place of any value a plan marks as sensitive (Requirement 10.1).
+_SENSITIVE_PLACEHOLDER = "(sensitive)"
+_SENSITIVE_PHASES = ("before", "after")
 
 _TERRAFORM_TO_RENDERER_TYPE = {
     "azurerm_api_management": "Microsoft.ApiManagement/service",
@@ -51,6 +62,9 @@ class TerraformTemplateBuilder:
 
     def __init__(self) -> None:
         self.logger = logger
+        # Single-entry identity cache for sensitivity lookups. The document reference is
+        # kept alongside its id so the id stays valid while the cache is live.
+        self._sensitive_cache: Optional[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = None
 
     def validate_terraform_cli(self) -> bool:
         """Return True when the Terraform CLI is available."""
@@ -76,6 +90,11 @@ class TerraformTemplateBuilder:
         with open(terraform_json_file, "r", encoding="utf-8") as handle:
             data = json.load(handle)
 
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Terraform JSON must be a JSON object, got {type(data).__name__}"
+            )
+
         format_version = str(data.get("format_version", "1.0"))
         major_version = format_version.split(".")[0]
         if major_version and major_version != "1":
@@ -87,15 +106,30 @@ class TerraformTemplateBuilder:
 
         return data
 
-    def build_document_from_json(self, terraform_json: Dict[str, Any]) -> LocalTemplateDocument:
-        """Build a normalized local template document from Terraform JSON."""
+    def build_document_from_json(
+        self,
+        terraform_json: Dict[str, Any],
+        change_model: Optional[ChangeModel] = None,
+    ) -> LocalTemplateDocument:
+        """Build a normalized local template document from Terraform JSON.
+
+        `change_model` is optional and trailing: when it is `None` the legacy path runs
+        unchanged, producing a document identical to the pre-plan-diff behaviour. When a model
+        is supplied (Plan_Diff_Mode), the document additionally carries the resources the plan
+        destroys, redacted sensitive leaves, a `change_category` per resource and the change
+        metadata (Requirements 3.3, 3.5, 4.1, 4.4, 10.1).
+        """
         values_root = terraform_json.get("planned_values") or terraform_json.get("values") or {}
         root_module = values_root.get("root_module", {})
         planned_resources = self._collect_planned_resources(root_module)
         config_resources = self._collect_configuration_resources(terraform_json.get("configuration", {}).get("root_module"))
 
         source_format = "terraform-plan-json" if terraform_json.get("planned_values") else "terraform-state-json"
-        return self._build_document_from_resources(
+
+        if change_model is not None:
+            planned_resources = self._merge_change_resources(terraform_json, planned_resources, change_model)
+
+        document = self._build_document_from_resources(
             planned_resources=planned_resources,
             config_resources=config_resources,
             source_format=source_format,
@@ -104,6 +138,99 @@ class TerraformTemplateBuilder:
                 "formatVersion": terraform_json.get("format_version", "1.0"),
             },
         )
+
+        if change_model is not None:
+            self._apply_change_model(document, change_model)
+
+        return document
+
+    def _merge_change_resources(
+        self,
+        terraform_json: Dict[str, Any],
+        planned_resources: List[Dict[str, Any]],
+        change_model: ChangeModel,
+    ) -> List[Dict[str, Any]]:
+        """Merge planned resources with reconstructed deletes, redacting sensitive leaves.
+
+        Planned resources come first, so an address present in both `planned_values` and a
+        delete record (a `replace`) keeps the `planned_values` values and appears exactly once
+        (Requirement 3.3). Deduplication happens before normalization, on the Terraform address.
+        Each resource's `values` tree is redacted against its own sensitivity mask:
+        `after_sensitive` for planned resources and `before_sensitive` for reconstructed deletes
+        (Requirement 10.1).
+        """
+        merged: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        reconstructed = self._reconstruct_deleted_resources(terraform_json, change_model)
+
+        for phase, resources in (("after", planned_resources), ("before", reconstructed)):
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                address = resource.get("address")
+                if isinstance(address, str) and address:
+                    if address in seen:
+                        self.logger.warning(
+                            "Duplicate Terraform address %s in plan resources; keeping the first entry", address
+                        )
+                        continue
+                    seen.add(address)
+                merged.append(self._redact_resource_values(terraform_json, resource, phase))
+
+        return merged
+
+    def _redact_resource_values(
+        self, terraform_json: Dict[str, Any], resource: Dict[str, Any], phase: str
+    ) -> Dict[str, Any]:
+        """Return the resource with every sensitive leaf of its `values` masked."""
+        address = resource.get("address")
+        if not isinstance(address, str) or not address:
+            return resource
+
+        mask = self._sensitive_mask_for(terraform_json, address, phase)
+        if mask is None:
+            return resource
+
+        redacted = dict(resource)
+        redacted["values"] = self._redact_sensitive(resource.get("values"), mask)
+        return redacted
+
+    def _apply_change_model(self, document: LocalTemplateDocument, change_model: ChangeModel) -> None:
+        """Attach the Change_Category of every resource and the change metadata.
+
+        Resources present in `planned_values` but absent from `resource_changes` default to
+        `unchanged` (Requirement 4.1). The metadata gains `changeCounts`, the round-trippable
+        `changeModel` payload and `changesNotDisplayed` (Requirement 4.4).
+        """
+        for resource in document.resources:
+            resource.change_category = change_model.category_for(resource.address) or UNCHANGED_CATEGORY
+
+        document.metadata["changeCounts"] = dict(change_model.counts)
+        document.metadata["changeModel"] = change_model.to_metadata()
+        document.metadata["changesNotDisplayed"] = self._changes_without_resource_entry(document, change_model)
+
+    @staticmethod
+    def _changes_without_resource_entry(
+        document: LocalTemplateDocument, change_model: ChangeModel
+    ) -> List[Dict[str, Any]]:
+        """List the changes that reached no resource entry in the document.
+
+        This is the part of the Change_Summary derivable at build time. Reasons that depend on
+        rendering (`skip-filter`, `unmapped-type`) are added later by the graph pipeline, which
+        keeps this key's shape stable: a list of `{address, terraformType, category, reason}`.
+        """
+        present = {resource.address for resource in document.resources}
+        return [
+            {
+                "address": record.address,
+                "terraformType": record.terraform_type,
+                "category": record.category,
+                "reason": "no-resource-entry",
+            }
+            for record in change_model.records.values()
+            if record.address not in present
+        ]
 
     def build_document_from_source(
         self, terraform_root_dir: str, var_files: Optional[List[str]] = None
@@ -164,13 +291,45 @@ class TerraformTemplateBuilder:
             metadata=metadata,
         )
 
+    def _build_plan_document(
+        self, terraform_json: Dict[str, Any], change_types: Optional[Sequence[str]] = None
+    ) -> LocalTemplateDocument:
+        """Build the document for a plan/state file, in Legacy_Mode or Plan_Diff_Mode.
+
+        A plan without a `resource_changes` key takes the exact legacy path: no Change_Model, no
+        filter, so the renderer template stays byte-identical (Requirement 8.1). An empty
+        `resource_changes` array is Plan_Diff_Mode with every resource `unchanged`, reported with
+        the Requirement 9.5 message.
+        """
+        raw_changes = terraform_json.get("resource_changes")
+        if raw_changes is None:
+            return self.build_document_from_json(terraform_json)
+
+        change_model = ChangeExtractor().extract(raw_changes)
+        if isinstance(raw_changes, list) and not raw_changes:
+            self.logger.info("Plan contains no resource changes")
+
+        document = self.build_document_from_json(terraform_json, change_model=change_model)
+        filtered = ChangeFilter(parse_change_types(change_types)).apply(document)
+        return filtered if filtered is not None else document
+
     def build_terraform_template(
-        self, terraform_json_file: str, output_file: Optional[str] = None
+        self,
+        terraform_json_file: str,
+        output_file: Optional[str] = None,
+        change_types: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
-        """Convert a Terraform show-json file into the current local-template JSON contract."""
+        """Convert a Terraform show-json file into the current local-template JSON contract.
+
+        `change_types` is trailing and optional. Without a `resource_changes` array in the plan
+        the legacy path runs untouched (Requirement 8.1). With one, the Change_Model is extracted,
+        the document is built with it and then restricted to the selected Change_Categories
+        (Requirements 1.1, 1.2, 6.9). The temp-file contract and the exception guard returning
+        `None` are unchanged (Requirements 9.1, 9.3).
+        """
         try:
             terraform_json = self.load_terraform_json(terraform_json_file)
-            document = self.build_document_from_json(terraform_json)
+            document = self._build_plan_document(terraform_json, change_types)
             renderer_template = document.to_renderer_template()
 
             if output_file is None:
@@ -551,6 +710,175 @@ class TerraformTemplateBuilder:
 
         return resources
 
+    def _sensitive_indexes(self, terraform_json: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Index a plan document by address for sensitivity lookups.
+
+        Returns `(changes_by_address, planned_sensitive_by_address)` where the first maps an
+        address to its `resource_changes[].change` object and the second maps an address to the
+        planned resource's own `sensitive_values`.
+        """
+        cached = self._sensitive_cache
+        if cached is not None and cached[0] == id(terraform_json):
+            return cached[2], cached[3]
+
+        changes_by_address: Dict[str, Any] = {}
+        raw_changes = terraform_json.get("resource_changes")
+        if isinstance(raw_changes, list):
+            for entry in raw_changes:
+                if not isinstance(entry, dict):
+                    continue
+                address = entry.get("address")
+                if isinstance(address, str) and address not in changes_by_address:
+                    changes_by_address[address] = entry.get("change")
+
+        planned_sensitive_by_address: Dict[str, Any] = {}
+        values_root = terraform_json.get("planned_values") or terraform_json.get("values") or {}
+        root_module = values_root.get("root_module", {}) if isinstance(values_root, dict) else {}
+        for resource in self._collect_planned_resources(root_module if isinstance(root_module, dict) else {}):
+            if not isinstance(resource, dict):
+                continue
+            address = resource.get("address")
+            if isinstance(address, str) and address not in planned_sensitive_by_address:
+                planned_sensitive_by_address[address] = resource.get("sensitive_values")
+
+        self._sensitive_cache = (id(terraform_json), terraform_json, changes_by_address, planned_sensitive_by_address)
+        return changes_by_address, planned_sensitive_by_address
+
+    def _sensitive_mask_for(self, terraform_json: Dict[str, Any], address: str, phase: str) -> Any:
+        """Resolve the sensitivity mask of one resource address for the given phase.
+
+        `phase` is `"after"` for planned resources and `"before"` for reconstructed delete
+        resources. An `"after"` lookup falls back to the planned resource's own
+        `sensitive_values` when the change object carries no `after_sensitive` (Requirement 10.1).
+        Returns `None` when the plan flags nothing for that address.
+        """
+        if phase not in _SENSITIVE_PHASES or not isinstance(terraform_json, dict) or not isinstance(address, str):
+            return None
+
+        changes_by_address, planned_sensitive_by_address = self._sensitive_indexes(terraform_json)
+
+        change = changes_by_address.get(address)
+        if isinstance(change, dict):
+            mask = change.get(f"{phase}_sensitive")
+            if mask is not None:
+                return mask
+
+        if phase == "after":
+            return planned_sensitive_by_address.get(address)
+        return None
+
+    def _redact_sensitive(self, values: Any, mask: Any) -> Any:
+        """Replace every leaf the mask flags with `(sensitive)`, preserving all other leaves.
+
+        The mask mirrors the shape of `values`: dictionaries are matched by key (absent keys are
+        not sensitive), lists by index, and a scalar `True` marks the whole subtree beneath it.
+        """
+        if mask is None:
+            return values
+        if not isinstance(mask, (dict, list)):
+            return _SENSITIVE_PLACEHOLDER if bool(mask) else values
+        if isinstance(values, dict) and isinstance(mask, dict):
+            return {
+                key: self._redact_sensitive(child, mask[key]) if key in mask else child
+                for key, child in values.items()
+            }
+        if isinstance(values, list) and isinstance(mask, list):
+            return [
+                self._redact_sensitive(item, mask[index] if index < len(mask) else None)
+                for index, item in enumerate(values)
+            ]
+        # Shape mismatch between the value tree and the mask: nothing is flagged here.
+        return values
+
+    def _reconstruct_deleted_resources(
+        self, terraform_json: Dict[str, Any], change_model: Optional[ChangeModel]
+    ) -> List[Dict[str, Any]]:
+        """Rebuild the resources a plan destroys, which `planned_values` omits.
+
+        `planned_values` describes post-apply state, so every resource scheduled for deletion
+        is absent from it and its attributes live only in `resource_changes[].change.before`
+        (Requirement 3.1). Each returned entry is shaped exactly like a planned resource
+        (`address`, `mode`, `type`, `name`, `provider_name`, `values`) so `_normalize_resource`
+        applies the same type mapping and property normalization as for surviving resources
+        (Requirement 3.2).
+
+        The entry `name` carries the Terraform address, so `_build_resource_name` falls back to
+        the address whenever `before` declares no `name` (Requirement 3.4).
+        """
+        if not isinstance(terraform_json, dict) or change_model is None:
+            return []
+
+        delete_addresses = [
+            record.address
+            for record in change_model.records.values()
+            if record.category == "delete" and record.address
+        ]
+        if not delete_addresses:
+            return []
+
+        values_root = terraform_json.get("planned_values") or terraform_json.get("values") or {}
+        root_module = values_root.get("root_module", {}) if isinstance(values_root, dict) else {}
+        planned_addresses = {
+            resource.get("address")
+            for resource in self._collect_planned_resources(root_module if isinstance(root_module, dict) else {})
+            if isinstance(resource, dict)
+        }
+
+        change_entries = self._index_change_entries(terraform_json)
+
+        reconstructed: List[Dict[str, Any]] = []
+        for address in delete_addresses:
+            if address in planned_addresses:
+                # A surviving planned entry already represents this address (Requirement 3.3).
+                continue
+
+            entry = change_entries.get(address)
+            if entry is None:
+                self.logger.warning(
+                    "Cannot reconstruct deleted resource %s: no matching resource_changes entry", address
+                )
+                continue
+
+            record = change_model.records.get(address)
+            change = entry.get("change")
+            before = change.get("before") if isinstance(change, dict) else None
+            if not isinstance(before, dict):
+                self.logger.warning(
+                    "Deleted resource %s carries no 'before' object; reconstructing it without values", address
+                )
+                before = {}
+
+            terraform_type = entry.get("type") or (record.terraform_type if record else "")
+            provider_name = entry.get("provider_name") or (record.provider_name if record else "") or "azurerm"
+
+            reconstructed.append(
+                {
+                    "address": address,
+                    "mode": "managed",
+                    "type": str(terraform_type or ""),
+                    # The address is the Requirement 3.4 display-name fallback for a nameless `before`.
+                    "name": address,
+                    "provider_name": str(provider_name),
+                    "values": dict(before),
+                }
+            )
+
+        return reconstructed
+
+    def _index_change_entries(self, terraform_json: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Index `resource_changes` by address, keeping the first entry per address."""
+        entries: Dict[str, Dict[str, Any]] = {}
+        raw_changes = terraform_json.get("resource_changes")
+        if not isinstance(raw_changes, list):
+            return entries
+        for entry in raw_changes:
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            if isinstance(address, str) and address and address not in entries:
+                entries[address] = entry
+        return entries
+
     def _normalize_resource(self, terraform_resource: Dict[str, Any]) -> Optional[LocalTemplateResource]:
         if terraform_resource.get("mode") != "managed":
             return None
@@ -622,9 +950,7 @@ class TerraformTemplateBuilder:
         if terraform_type == "azurerm_kubernetes_cluster":
             properties = {}
             agent_pool_profiles = []
-            for pool in self._as_sequence(values.get("default_node_pool")):
-                if not isinstance(pool, dict):
-                    continue
+            for pool in self._as_block_list(values.get("default_node_pool")):
                 subnet_id = pool.get("vnet_subnet_id")
                 if not subnet_id:
                     continue
@@ -645,7 +971,7 @@ class TerraformTemplateBuilder:
             if subnet_id:
                 properties["subnet"] = {"id": subnet_id}
             connections = []
-            for connection in values.get("private_service_connection", []) or []:
+            for connection in self._as_block_list(values.get("private_service_connection")):
                 service_id = connection.get("private_connection_resource_id")
                 if service_id:
                     connections.append({"properties": {"privateLinkServiceId": service_id}})
@@ -659,7 +985,7 @@ class TerraformTemplateBuilder:
 
         if terraform_type == "azurerm_bastion_host":
             ip_configurations = []
-            for ip_configuration in values.get("ip_configuration", []) or []:
+            for ip_configuration in self._as_block_list(values.get("ip_configuration")):
                 subnet_id = ip_configuration.get("subnet_id")
                 if not subnet_id:
                     continue
@@ -673,7 +999,7 @@ class TerraformTemplateBuilder:
 
         if terraform_type == "azurerm_application_gateway":
             gateway_configs = []
-            for gateway_configuration in values.get("gateway_ip_configuration", []) or []:
+            for gateway_configuration in self._as_block_list(values.get("gateway_ip_configuration")):
                 subnet_id = gateway_configuration.get("subnet_id")
                 if not subnet_id:
                     continue
@@ -852,6 +1178,22 @@ class TerraformTemplateBuilder:
             return value
         return [value]
 
+    def _as_block_list(self, value: Any) -> List[Dict[str, Any]]:
+        """Return the nested-block entries of `value` as a list of dictionaries.
+
+        Terraform renders a nested block as a list of objects, and a single block as either a
+        one-element list or a bare object. Sensitive redaction, however, replaces a whole flagged
+        subtree with the literal string ``(sensitive)``, so a block key may hold a scalar instead
+        of the expected structure. Every non-dictionary entry is dropped so an opaque redacted
+        block is simply not mined for subnet or service ids (Requirements 10.1, 12.8), while a
+        normal list of block objects passes through unchanged (Requirement 8.1).
+        """
+        if isinstance(value, dict):
+            return [value]
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
     def _attach_subnets_to_virtual_networks(self, resources: List[LocalTemplateResource]) -> None:
         vnet_index = {
             resource.name: resource
@@ -885,7 +1227,15 @@ class TerraformTemplateBuilder:
             )
 
 
-def build_terraform_template(terraform_json_file: str, output_file: Optional[str] = None) -> Optional[str]:
-    """Convenience wrapper for Terraform JSON normalization."""
+def build_terraform_template(
+    terraform_json_file: str,
+    output_file: Optional[str] = None,
+    change_types: Optional[Sequence[str]] = None,
+) -> Optional[str]:
+    """Convenience wrapper for Terraform JSON normalization.
+
+    The positional signature is unchanged; `change_types` is trailing and optional so existing
+    call sites stay source-compatible.
+    """
     builder = TerraformTemplateBuilder()
-    return builder.build_terraform_template(terraform_json_file, output_file)
+    return builder.build_terraform_template(terraform_json_file, output_file, change_types)

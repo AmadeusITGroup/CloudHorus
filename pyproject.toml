@@ -50,6 +50,7 @@ export = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.1.0",
+    "hypothesis>=6.100",
     "black>=23.3.0",
     "isort>=5.12.0",
     "flake8>=7.0.0",
@@ -78,6 +79,9 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "performance: timing benchmarks; deselect with -m 'not performance'",
+]
 
 # ── black ───────────────────────────────────────────────────
 [tool.black]

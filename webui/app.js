@@ -25,7 +25,10 @@ const state = {
   paramFiles: [],
   terraformMainFiles: [],
   terraformVarFiles: [],
+  terraformPlanFiles: [],
   terraformScopeMetadataFiles: [],
+  changeTypes: [],          // selected Change_Categories ([] means every category)
+  changeSummary: null,      // payload of the *.change-summary.json sidecar
   bicepSubscriptions: [],  // parsed from _cloudHorus metadata
   terraformSubscriptions: [],
   templateSubMap: [],       // maps each template index -> unique subscription index
@@ -429,6 +432,9 @@ function selectMode(mode) {
     if (authSection) authSection.classList.add('hidden');
     state.authMethod = 'device-code';
   }
+  // The Change_Filter belongs to Plan_Diff_Mode only: Live, Bicep and Terraform
+  // source selections keep it hidden (Requirement 8.4).
+  updateChangeFilterVisibility();
   refreshPreview();
 }
 
@@ -866,6 +872,28 @@ async function pickTerraformVarFiles() {
   }
 }
 
+async function pickTerraformPlanFiles() {
+  const a = api();
+  if (!a) return;
+  try {
+    const files = await a.pick_files('terraform-plan');
+    if (files && files.length > 0) {
+      // Plan_File input accepts `.json` documents only (Requirement 1.3)
+      const accepted = files.filter(file => file.toLowerCase().endsWith('.json'));
+      const rejected = files.length - accepted.length;
+      state.terraformPlanFiles = mergeUniqueFiles(state.terraformPlanFiles, accepted);
+      renderFileChips('terraform-plan');
+      updateChangeFilterVisibility();
+      refreshPreview();
+      if (rejected > 0) {
+        showToast('Terraform plan input only accepts files ending in .json', 'warning');
+      }
+    }
+  } catch (e) {
+    showToast('Terraform plan JSON picker failed', 'error');
+  }
+}
+
 async function pickParamFiles() {
   const a = api();
   if (!a) return;
@@ -1052,6 +1080,9 @@ async function removeFile(type, index) {
   } else if (type === 'terraform-main') {
     state.terraformMainFiles.splice(index, 1);
     await refreshTerraformSourceMetadata();
+  } else if (type === 'terraform-plan') {
+    state.terraformPlanFiles.splice(index, 1);
+    updateChangeFilterVisibility();
   } else {
     state.terraformVarFiles.splice(index, 1);
     await refreshTerraformSourceMetadata();
@@ -1065,6 +1096,7 @@ function getFileList(type) {
   if (type === 'params') return state.paramFiles;
   if (type === 'terraform-main') return state.terraformMainFiles;
   if (type === 'terraform-vars') return state.terraformVarFiles;
+  if (type === 'terraform-plan') return state.terraformPlanFiles;
   return [];
 }
 
@@ -1108,8 +1140,14 @@ function buildCommandArgs() {
     args.resourcegroups = document.getElementById('input-resourcegroups').value.trim();
     args.discoverResourceGroups = Array.from(discoveryStore);
   } else if (state.mode === 'terraform') {
-    args.terraformRootDirs = terraformRootDirsFromMainFiles(state.terraformMainFiles);
-    args.terraformVarFiles = state.terraformVarFiles;
+    if (isPlanDiffSelection()) {
+      // Plan_Diff_Mode: the Plan_File replaces the source selection for this run
+      args.terraformJsonFiles = state.terraformPlanFiles;
+      args.changeTypes = selectedChangeTypes();
+    } else {
+      args.terraformRootDirs = terraformRootDirsFromMainFiles(state.terraformMainFiles);
+      args.terraformVarFiles = state.terraformVarFiles;
+    }
     args.scopeMetadataFiles = state.terraformScopeMetadataFiles;
   } else {
     args.bicepFiles = state.bicepFiles;
@@ -1196,8 +1234,18 @@ function buildCommandString() {
     if (args.resourcegroups) parts.push('--resourcegroups', ...args.resourcegroups.split(/\s+/));
     if (args.discoverResourceGroups && args.discoverResourceGroups.length > 0) parts.push('--discoverResourceGroups', ...args.discoverResourceGroups);
   } else if (state.mode === 'terraform') {
-    if (args.terraformRootDirs.length) parts.push('--terraformRootDirs', ...args.terraformRootDirs);
-    if (args.terraformVarFiles.length) parts.push('--terraformVarFiles', ...args.terraformVarFiles);
+    if (args.terraformJsonFiles && args.terraformJsonFiles.length) {
+      parts.push('--terraformJsonFiles', ...args.terraformJsonFiles);
+      // The full category set is the CLI default, so only a strict subset is
+      // worth putting on the command line (Requirement 8.3).
+      const changeTypes = args.changeTypes || [];
+      if (changeTypes.length > 0 && changeTypes.length < CHANGE_CATEGORIES.length) {
+        parts.push('--changeTypes', ...changeTypes);
+      }
+    } else {
+      if (args.terraformRootDirs && args.terraformRootDirs.length) parts.push('--terraformRootDirs', ...args.terraformRootDirs);
+      if (args.terraformVarFiles && args.terraformVarFiles.length) parts.push('--terraformVarFiles', ...args.terraformVarFiles);
+    }
     if (args.scopeMetadataFiles && args.scopeMetadataFiles.length) {
       parts.push('--scopeMetadataFiles', ...args.scopeMetadataFiles);
     }
@@ -1280,9 +1328,19 @@ function validate() {
       showToast('Bicep & parameter file counts must match', 'error');
       return false;
     }
-    if (state.mode === 'terraform' && state.terraformMainFiles.length === 0) {
-      showToast('Select Terraform main.tf files', 'error');
-      return false;
+    if (state.mode === 'terraform') {
+      // Exactly one Terraform input per run (Requirement 1.5). Checked here so the
+      // subprocess never starts with a contradictory selection.
+      if (state.terraformPlanFiles.length > 0 && state.terraformMainFiles.length > 0) {
+        showToast(TERRAFORM_INPUT_CONFLICT_MESSAGE, 'error');
+        return false;
+      }
+      // A Plan_File replaces the main.tf / .tfvars pairing for that run
+      if (state.terraformPlanFiles.length > 0) return true;
+      if (state.terraformMainFiles.length === 0) {
+        showToast('Select Terraform main.tf files', 'error');
+        return false;
+      }
     }
     if (
       state.mode === 'terraform' &&
@@ -1300,6 +1358,236 @@ function validate() {
     }
   }
   return true;
+}
+
+// ─── Terraform Plan Diff: Change Type Filter ───
+// Canonical Change_Category order, mirroring core.plan_diff.CHANGE_CATEGORIES.
+const CHANGE_CATEGORIES = ['create', 'update', 'replace', 'delete', 'unchanged'];
+
+// Fallback Change_Style table, used when the sidecar carries no `changeStyles`
+// block. Kept in the same colour/flag pairing as src/utils/change_style.py.
+const CHANGE_STYLE_FALLBACK = {
+  create: { color: '#107C10', flag: '+', label: 'Create' },
+  update: { color: '#0078D4', flag: '~', label: 'Update' },
+  replace: { color: '#D13438', flag: '±', label: 'Replace' },
+  delete: { color: '#D13438', flag: '-', label: 'Delete' },
+  unchanged: null,
+};
+
+const TERRAFORM_INPUT_CONFLICT_MESSAGE = 'Choose exactly one Terraform input: plan JSON or source directories';
+const EMPTY_SELECTION_MESSAGE = 'No resources match the selected change types';
+
+// True when the current selection is a Plan_Diff_Mode run: Terraform mode with
+// at least one Plan_File picked.
+function isPlanDiffSelection() {
+  return state.mode === 'terraform' && state.terraformPlanFiles.length > 0;
+}
+
+// Selected categories in canonical order. An empty selection means "every
+// category", which is also the CLI default.
+function selectedChangeTypes() {
+  const selected = new Set(state.changeTypes || []);
+  return CHANGE_CATEGORIES.filter(c => selected.has(c));
+}
+
+function changeStyleFor(category) {
+  const styles = (state.changeSummary && state.changeSummary.changeStyles) || CHANGE_STYLE_FALLBACK;
+  const style = Object.prototype.hasOwnProperty.call(styles, category)
+    ? styles[category]
+    : CHANGE_STYLE_FALLBACK[category];
+  return style || null;
+}
+
+function changeCategoryLabel(category) {
+  const style = changeStyleFor(category);
+  if (style && style.label) return style.label;
+  return category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+function presentChangeCategories() {
+  const summary = state.changeSummary;
+  if (!summary) return [];
+  const present = new Set(summary.presentCategories || []);
+  return CHANGE_CATEGORIES.filter(c => present.has(c));
+}
+
+function updateChangeFilterVisibility() {
+  const panel = document.getElementById('change-filter-panel');
+  if (!panel) return;
+  const show = isPlanDiffSelection() && !!state.changeSummary && presentChangeCategories().length > 0;
+  panel.classList.toggle('hidden', !show);
+}
+
+function clearChangeFilter() {
+  state.changeSummary = null;
+  state.changeTypes = [];
+  const chips = document.getElementById('change-filter-chips');
+  if (chips) chips.innerHTML = '';
+  const badge = document.getElementById('change-undisplayed-badge');
+  if (badge) {
+    badge.textContent = '';
+    badge.classList.add('hidden');
+  }
+  updateChangeFilterVisibility();
+}
+
+// Read the Change_Summary sidecar beside a generated PNG and drive the chips.
+// `resetSelection` is false for a filtered re-run so the operator's selection
+// survives the round trip.
+async function loadChangeSummary(pngPath, resetSelection = true) {
+  const a = api();
+  if (!a || !a.read_change_summary || !pngPath) {
+    if (resetSelection) clearChangeFilter();
+    return null;
+  }
+  let summary = null;
+  try {
+    summary = await a.read_change_summary(pngPath);
+  } catch (e) {
+    summary = null;
+  }
+  if (!summary) {
+    // No sidecar: a Legacy_Mode run, nothing to filter
+    if (resetSelection) clearChangeFilter();
+    return null;
+  }
+  applyChangeSummary(summary, resetSelection);
+  return summary;
+}
+
+// Populate the chips from a Change_Summary payload. Every present category
+// starts selected (Requirements 6.1, 6.2).
+function applyChangeSummary(summary, resetSelection = true) {
+  state.changeSummary = summary || null;
+  if (resetSelection) {
+    state.changeTypes = presentChangeCategories();
+  } else {
+    state.changeTypes = selectedChangeTypes();
+  }
+  renderChangeFilterChips();
+  renderUndisplayedBadge();
+  updateChangeFilterVisibility();
+  refreshPreview();
+}
+
+function renderChangeFilterChips() {
+  const container = document.getElementById('change-filter-chips');
+  if (!container) return;
+
+  const counts = (state.changeSummary && state.changeSummary.counts) || {};
+  const selected = new Set(selectedChangeTypes());
+
+  container.innerHTML = presentChangeCategories().map(category => {
+    const style = changeStyleFor(category);
+    const label = changeCategoryLabel(category);
+    const count = counts[category] || 0;
+    const isSelected = selected.has(category);
+    // Colour the chip only while selected so the unselected state stays muted;
+    // the CSS selected rule derives the border from currentColor.
+    const colorStyle = isSelected && style && style.color ? ` style="color:${escapeHtml(style.color)}"` : '';
+    const flag = style && style.flag
+      ? `<span class="change-chip-flag" aria-hidden="true">${escapeHtml(style.flag)}</span>`
+      : '';
+    return `<button type="button" class="change-chip" id="change-chip-${category}"
+      data-category="${category}" aria-pressed="${isSelected ? 'true' : 'false'}"
+      aria-label="${escapeHtml(label)}, ${count} resource${count === 1 ? '' : 's'}"
+      title="Toggle ${escapeHtml(label)} resources"
+      onclick="toggleChangeType('${category}')"${colorStyle}>${flag}<span class="change-chip-label">${escapeHtml(label)}</span><span class="change-chip-count">${count}</span></button>`;
+  }).join('');
+}
+
+// "N changes not displayed" next to the chips (Requirement 7.5).
+function renderUndisplayedBadge() {
+  const badge = document.getElementById('change-undisplayed-badge');
+  if (!badge) return;
+  const notDisplayed = (state.changeSummary && state.changeSummary.notDisplayed) || [];
+  const count = notDisplayed.length;
+  if (count === 0) {
+    badge.textContent = '';
+    badge.classList.add('hidden');
+    return;
+  }
+  badge.textContent = count === 1 ? '1 change not displayed' : `${count} changes not displayed`;
+  badge.classList.remove('hidden');
+}
+
+// Chip toggle: flip the category, then re-run generation with the new
+// selection. An empty selection keeps the current diagram (Requirement 6.8).
+async function toggleChangeType(category) {
+  if (!CHANGE_CATEGORIES.includes(category)) return;
+  if (state.running) return;
+
+  const selected = new Set(selectedChangeTypes());
+  if (selected.has(category)) {
+    selected.delete(category);
+  } else {
+    selected.add(category);
+  }
+  state.changeTypes = CHANGE_CATEGORIES.filter(c => selected.has(c));
+  renderChangeFilterChips();
+  refreshPreview();
+
+  if (state.changeTypes.length === 0) {
+    showToast(EMPTY_SELECTION_MESSAGE, 'warning');
+    appendConsole('[CloudHorus] ' + EMPTY_SELECTION_MESSAGE, 'warning');
+    return;
+  }
+
+  await rerunWithChangeTypes();
+}
+
+// Re-run generation with the current chip selection. The progress indicator
+// stays up until the updated view is available (Requirement 11.3), and the
+// previous PNG remains in #viewer-img until the new one loads.
+async function rerunWithChangeTypes() {
+  const a = api();
+  if (!a || !a.rerun_with_change_types) {
+    showToast('Backend not connected', 'error');
+    return;
+  }
+  if (state.running) return;
+
+  const changeTypes = selectedChangeTypes();
+  if (changeTypes.length === 0) {
+    showToast(EMPTY_SELECTION_MESSAGE, 'warning');
+    return;
+  }
+
+  state.running = true;
+  setStatus('running', 'Filtering...');
+  showProgress(true);
+  appendConsole('[CloudHorus] Applying change type filter: ' + changeTypes.join(' '), 'info');
+
+  const generateBtn = document.getElementById('btn-generate');
+  const stopBtn = document.getElementById('btn-stop');
+  if (generateBtn) generateBtn.classList.add('hidden');
+  if (stopBtn) stopBtn.classList.remove('hidden');
+
+  try {
+    const args = buildCommandArgs();
+    const result = await a.rerun_with_change_types(JSON.stringify(args), changeTypes);
+    if (result && result.success) {
+      setStatus('ready', 'Complete');
+      if (result.file) {
+        state.lastGeneratedFile = result.file;
+        await showImage(result.file);
+        await loadChangeSummary(result.file, false);
+      }
+      showToast('Change type filter applied', 'success');
+    } else {
+      setStatus('error', 'Failed');
+      showToast('Filtered run failed', 'error');
+    }
+  } catch (err) {
+    setStatus('error', 'Error');
+    appendConsole('[Error] ' + err.message, 'error');
+    showToast('Filtered run error: ' + err.message, 'error');
+  } finally {
+    state.running = false;
+    showProgress(false);
+    if (generateBtn) generateBtn.classList.remove('hidden');
+    if (stopBtn) stopBtn.classList.add('hidden');
+  }
 }
 
 // ─── Generate ───
@@ -1330,6 +1618,8 @@ async function generate() {
   prevViewer.classList.add('hidden');
   prevImg.removeAttribute('src');
   state.lastGeneratedFile = null;
+  // Chips describe the diagram on screen, so they go away with it
+  clearChangeFilter();
 
   // Hide horizontal splitter and restore console to normal
   const hSplitter = document.getElementById('h-splitter');
@@ -1366,6 +1656,9 @@ async function generate() {
       // Auto-show the image
       if (result.file) {
         showImage(result.file);
+        // Plan_Diff_Mode writes a Change_Summary sidecar beside the PNG; a
+        // Legacy_Mode run has none and leaves the filter panel hidden.
+        await loadChangeSummary(result.file, true);
       }
     } else {
       setStatus('error', 'Failed');

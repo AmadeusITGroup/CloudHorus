@@ -4,6 +4,8 @@ from typing import Any, Dict, Optional
 
 from graphviz import Digraph
 
+from .change_style import decorate_label, node_style_attributes, resolve_style
+
 
 class GraphNodeBuilder:
     """Builder for Graphviz nodes with consistent styling."""
@@ -15,12 +17,13 @@ class GraphNodeBuilder:
         self.default_fontsize = "10"
         self.default_margin = "0.05,0.02"
 
-    def create_node_label(self, label: str, resource_type: str) -> str:
+    def create_node_label(self, label: str, resource_type: str, change_category: Optional[str] = None) -> str:
         """Create a formatted HTML label for a node.
 
         Args:
             label: The main label text
             resource_type: The resource type to display
+            change_category: Optional Change_Category decorating the label only
 
         Returns:
             HTML formatted label string
@@ -31,15 +34,26 @@ class GraphNodeBuilder:
         else:
             display_type = resource_type.split(".")[-1]
 
-        return (
+        node_label = (
             f"<<TABLE border='0' cellborder='0' cellspacing='0'>"
             f"<TR><TD>{label}</TD></TR>"
             f"<TR><TD>{display_type}</TD></TR>"
             f"</TABLE>>"
         )
 
+        style = resolve_style(change_category)
+        if style is not None:
+            node_label = decorate_label(node_label, style)
+        return node_label
+
     def get_node_attributes(
-        self, label: str, image_path: str, resource_type: str, group: str = "", **kwargs
+        self,
+        label: str,
+        image_path: str,
+        resource_type: str,
+        group: str = "",
+        change_category: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, str]:
         """Get node attributes for Graphviz.
 
@@ -48,12 +62,13 @@ class GraphNodeBuilder:
             image_path: Path to the icon image
             resource_type: The Azure resource type
             group: Optional group identifier for layout
+            change_category: Optional Change_Category decorating the label only
             **kwargs: Additional custom attributes
 
         Returns:
             Dictionary of Graphviz node attributes
         """
-        node_label = self.create_node_label(label, resource_type)
+        node_label = self.create_node_label(label, resource_type, change_category)
 
         attributes = {
             "label": node_label,
@@ -71,6 +86,11 @@ class GraphNodeBuilder:
         if group:
             attributes["group"] = group
 
+        # Border and background over the whole node; the icon draws on top of the fill.
+        style = resolve_style(change_category)
+        if style is not None:
+            attributes.update(node_style_attributes(style))
+
         # Add any additional custom attributes
         for key, value in kwargs.items():
             if key not in attributes:
@@ -86,6 +106,7 @@ class GraphNodeBuilder:
         image_path: str,
         resource_type: str,
         group: str = "",
+        change_category: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Add a node to a Graphviz subgraph.
@@ -97,9 +118,12 @@ class GraphNodeBuilder:
             image_path: Path to the icon image
             resource_type: The Azure resource type
             group: Optional group identifier for layout
+            change_category: Optional Change_Category decorating the label only
             **kwargs: Additional custom attributes
         """
-        attributes = self.get_node_attributes(label, image_path, resource_type, group, **kwargs)
+        attributes = self.get_node_attributes(
+            label, image_path, resource_type, group, change_category=change_category, **kwargs
+        )
         subgraph.node(node_id, **attributes)
 
 
@@ -116,7 +140,13 @@ def get_node_builder() -> GraphNodeBuilder:
 
 
 def add_node_in_subgraph(
-    subgraph: Digraph, node_id: str, label: str, image_path: str, resource_type: str, group: str = ""
+    subgraph: Digraph,
+    node_id: str,
+    label: str,
+    image_path: str,
+    resource_type: str,
+    group: str = "",
+    change_category: Optional[str] = None,
 ) -> None:
     """Add a node to a subgraph (backward compatibility).
 
@@ -127,6 +157,13 @@ def add_node_in_subgraph(
         image_path: Path to icon image
         resource_type: Azure resource type
         group: Optional group identifier
+        change_category: Optional Change_Category. ``None``, ``"unchanged"``, and
+            unknown values leave every attribute exactly as in Legacy_Mode;
+            otherwise the label gains the Flag_Token and the node gains a
+            coloured border plus a tinted background over its whole area
+            (Requirements 4.5, 4.6, 5.5, 5.6).
     """
     builder = get_node_builder()
-    builder.add_node_to_subgraph(subgraph, node_id, label, image_path, resource_type, group)
+    builder.add_node_to_subgraph(
+        subgraph, node_id, label, image_path, resource_type, group, change_category=change_category
+    )

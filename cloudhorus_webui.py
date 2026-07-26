@@ -25,6 +25,7 @@ if SRC_DIR not in sys.path:
 
 import webview
 from core.local_input_metadata import discover_terraform_source_scope_metadata, parse_scope_metadata_files
+from core.plan_diff import CHANGE_CATEGORIES
 
 # ─── Constants ───────────────────────────────────────────────────────────
 WEBUI_DIR = os.path.join(PROJECT_ROOT, "webui")
@@ -53,6 +54,35 @@ def _load_version() -> str:
 
 
 APP_VERSION = _load_version()
+
+#: Fallback suffix of the Change_Summary sidecar written next to the PNG.
+#: The authoritative constant is ``core.graph_generator.CHANGE_SUMMARY_SUFFIX``, but
+#: that module pulls Graphviz and the Azure SDK, which the GUI host process has no
+#: reason to load just to read a small JSON file next to the diagram.
+_CHANGE_SUMMARY_SUFFIX_FALLBACK = ".change-summary.json"
+
+
+def _change_summary_suffix() -> str:
+    """Return the Change_Summary sidecar suffix, preferring the shared constant."""
+    try:
+        from core.graph_generator import CHANGE_SUMMARY_SUFFIX  # noqa: PLC0415
+
+        return CHANGE_SUMMARY_SUFFIX
+    except Exception:
+        return _CHANGE_SUMMARY_SUFFIX_FALLBACK
+
+
+def normalize_change_types(change_types: Any) -> List[str]:
+    """Normalize a Change_Filter selection to canonical order, dropping unknowns.
+
+    Returns the categories in ``CHANGE_CATEGORIES`` order with duplicates removed,
+    so two selections carrying the same categories in a different order marshal to
+    the same CLI arguments (Requirement 6.5).
+    """
+    if not isinstance(change_types, (list, tuple, set, frozenset)):
+        return []
+    selected = {value for value in change_types if isinstance(value, str)}
+    return [category for category in CHANGE_CATEGORIES if category in selected]
 
 
 class CloudHorusAPI:
@@ -84,7 +114,8 @@ class CloudHorusAPI:
 
         Args:
             file_type: 'bicep' for .bicep files, 'params' for .json files,
-                'terraform-main' for .tf files, 'terraform-vars' for .tfvars files
+                'terraform-main' for .tf files, 'terraform-vars' for .tfvars files,
+                'terraform-plan' for `terraform show -json` plan documents
 
         Returns:
             List of selected file paths
@@ -99,6 +130,9 @@ class CloudHorusAPI:
                 file_types = ("Terraform Entry Files (*.tf)", "All Files (*.*)")
             elif file_type == "terraform-vars":
                 file_types = ("Terraform Variable Files (*.tfvars)", "All Files (*.*)")
+            elif file_type == "terraform-plan":
+                # Plan JSON produced by `terraform show -json <planfile>` (Requirement 1.3)
+                file_types = ("Terraform Plan JSON (*.json)", "All Files (*.*)")
             else:
                 file_types = ("JSON Files (*.json)", "All Files (*.*)")
 
@@ -220,6 +254,31 @@ class CloudHorusAPI:
         except Exception as e:
             self._running = False
             return {"success": False, "error": str(e)}
+
+    def rerun_with_change_types(self, args_json: str, change_types: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Re-run generation with a new Change_Filter selection.
+
+        Used by the filter chips: the front end keeps the original argument payload
+        and only swaps the selected Change_Categories, so a filtered re-run differs
+        from the first run by `--changeTypes` alone (Requirement 6.9).
+
+        Args:
+            args_json: JSON string of the configuration arguments of the original run
+            change_types: Change_Categories to display; unknown values are dropped
+
+        Returns:
+            Same shape as `start_generation`
+        """
+        try:
+            args = json.loads(args_json)
+        except json.JSONDecodeError as e:
+            return {"success": False, "error": f"Invalid args: {e}"}
+
+        if not isinstance(args, dict):
+            return {"success": False, "error": "Invalid args: expected a JSON object"}
+
+        args["changeTypes"] = normalize_change_types(change_types)
+        return self.start_generation(json.dumps(args))
 
     def stop_generation(self) -> bool:
         """Stop the running generation process."""
@@ -343,7 +402,7 @@ class CloudHorusAPI:
         mode = args.get("mode", "live")
         if mode is None:
             # Detect mode from presence of local template inputs
-            if args.get("terraformRootDirs"):
+            if args.get("terraformRootDirs") or args.get("terraformJsonFiles"):
                 mode = "terraform"
             else:
                 mode = "bicep" if args.get("bicepFiles") else "live"
@@ -365,12 +424,26 @@ class CloudHorusAPI:
             if discoverRgs and len(discoverRgs) > 0:
                 cmd.extend(["--discoverResourceGroups"] + discoverRgs)
         elif mode == "terraform":
+            # A Terraform run carries either a plan JSON or HCL source directories,
+            # never both (Requirement 1.5). The plan branch is additive: without a
+            # plan file the source marshalling below is byte-identical to before
+            # this feature (Requirement 8.8).
+            terraform_json_files = args.get("terraformJsonFiles", [])
             terraform_root_dirs = args.get("terraformRootDirs", [])
             terraform_var_files = args.get("terraformVarFiles", [])
-            if terraform_root_dirs:
-                cmd.extend(["--terraformRootDirs"] + terraform_root_dirs)
-            if terraform_var_files:
-                cmd.extend(["--terraformVarFiles"] + terraform_var_files)
+            if terraform_json_files:
+                cmd.extend(["--terraformJsonFiles"] + terraform_json_files)
+                # `--changeTypes` only means something for plan JSON input, and only
+                # a strict subset narrows the diagram: the full set is the CLI
+                # default, so it stays off the command line (Requirement 8.3).
+                change_types = normalize_change_types(args.get("changeTypes"))
+                if 0 < len(change_types) < len(CHANGE_CATEGORIES):
+                    cmd.extend(["--changeTypes"] + change_types)
+            else:
+                if terraform_root_dirs:
+                    cmd.extend(["--terraformRootDirs"] + terraform_root_dirs)
+                if terraform_var_files:
+                    cmd.extend(["--terraformVarFiles"] + terraform_var_files)
         else:
             # Bicep mode args
             bicep_files = args.get("bicepFiles", [])
@@ -574,6 +647,39 @@ class CloudHorusAPI:
             for f in os.listdir(folder):
                 if f.endswith(".drawio") and f.startswith(basename[:20]):
                     return os.path.join(folder, f)
+        except Exception:
+            pass
+        return None
+
+    def read_change_summary(self, png_path: str) -> Optional[Dict[str, Any]]:
+        """Given a generated PNG path, read the Change_Summary sidecar beside it.
+
+        The sidecar is `<diagram>.change-summary.json` in the output folder of the
+        diagram (Requirement 7.5). It only exists for a Plan_Diff_Mode run, so a
+        missing file is a normal Legacy_Mode outcome and returns `None` rather than
+        an error. The payload feeds the filter chips and the undisplayed-changes
+        badge.
+        """
+        suffix = _change_summary_suffix()
+        try:
+            base = os.path.splitext(png_path)[0]
+            candidates = [base + suffix]
+            # Also tolerate naming variations, like find_drawio_file does
+            folder = os.path.dirname(png_path)
+            basename = os.path.basename(base)
+            if folder and os.path.isdir(folder):
+                candidates.extend(
+                    os.path.join(folder, f)
+                    for f in sorted(os.listdir(folder))
+                    if f.endswith(suffix) and f.startswith(basename[:20])
+                )
+            for candidate in candidates:
+                if not os.path.exists(candidate):
+                    continue
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if isinstance(payload, dict):
+                    return payload
         except Exception:
             pass
         return None

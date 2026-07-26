@@ -1499,6 +1499,61 @@ body {
   display: flex;
   gap: 4px;
 }
+/* ─── Terraform plan diff: change type filter ─── */
+.change-filter-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  margin: 0 12px;
+}
+.change-filter-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.change-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.change-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+}
+.change-chip:hover { color: var(--text-primary); }
+.change-chip:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.change-chip[aria-pressed="true"] {
+  color: var(--text-primary);
+  border-color: currentColor;
+  background: rgba(255, 255, 255, .08);
+}
+.change-chip .change-chip-flag { font-weight: 700; }
+.change-chip .change-chip-count { opacity: .75; }
+.change-undisplayed-badge {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(255, 185, 0, .16);
+  color: var(--accent-yellow, #ffb900);
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
 .viewer-canvas {
   flex: 1;
   background: var(--bg-elevated);

@@ -1,0 +1,528 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_virtual_network.hub",
+          "mode": "managed",
+          "type": "azurerm_virtual_network",
+          "name": "hub",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "vnet-hub",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "address_space": ["10.40.0.0/16"]
+          }
+        },
+        {
+          "address": "azurerm_subnet.app",
+          "mode": "managed",
+          "type": "azurerm_subnet",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "snet-app",
+            "resource_group_name": "cloudhorus-rg-1",
+            "virtual_network_name": "vnet-hub",
+            "address_prefixes": ["10.40.1.0/24"]
+          }
+        },
+        {
+          "address": "azurerm_subnet.data",
+          "mode": "managed",
+          "type": "azurerm_subnet",
+          "name": "data",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "snet-data",
+            "resource_group_name": "cloudhorus-rg-1",
+            "virtual_network_name": "vnet-hub",
+            "address_prefixes": ["10.40.2.0/24"]
+          }
+        },
+        {
+          "address": "azurerm_service_plan.app",
+          "mode": "managed",
+          "type": "azurerm_service_plan",
+          "name": "app",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "plan-app",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "sku_name": "P1v3",
+            "os_type": "Linux"
+          }
+        },
+        {
+          "address": "module.app.azurerm_linux_web_app.api",
+          "mode": "managed",
+          "type": "azurerm_linux_web_app",
+          "name": "api",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "app-api",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "service_plan_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Web/serverfarms/plan-app",
+            "virtual_network_subnet_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Network/virtualNetworks/vnet-hub/subnets/snet-app"
+          },
+          "sensitive_values": {
+            "site_credential": true
+          }
+        },
+        {
+          "address": "azurerm_kubernetes_cluster.platform",
+          "mode": "managed",
+          "type": "azurerm_kubernetes_cluster",
+          "name": "platform",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "aks-platform",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "dns_prefix": "aks-platform",
+            "default_node_pool": [
+              {
+                "name": "system",
+                "vnet_subnet_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Network/virtualNetworks/vnet-hub/subnets/snet-app"
+              }
+            ],
+            "kube_admin_config_raw": "(will be redacted)"
+          }
+        },
+        {
+          "address": "azurerm_storage_account.assets",
+          "mode": "managed",
+          "type": "azurerm_storage_account",
+          "name": "assets",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "stassetsnew",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "account_tier": "Standard",
+            "account_replication_type": "LRS",
+            "primary_access_key": "GENERATED-AT-APPLY"
+          }
+        },
+        {
+          "address": "azurerm_redis_cache.session",
+          "mode": "managed",
+          "type": "azurerm_redis_cache",
+          "name": "session",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "redis-session",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "sku_name": "Standard",
+            "capacity": 1
+          }
+        },
+        {
+          "address": "azurerm_route_table.egress",
+          "mode": "managed",
+          "type": "azurerm_route_table",
+          "name": "egress",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "rt-egress",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1"
+          }
+        },
+        {
+          "address": "azurerm_key_vault.secrets",
+          "mode": "managed",
+          "type": "azurerm_key_vault",
+          "name": "secrets",
+          "provider_name": "registry.terraform.io/hashicorp/azurerm",
+          "values": {
+            "name": "kv-platform",
+            "location": "westeurope",
+            "resource_group_name": "cloudhorus-rg-1",
+            "sku_name": "standard"
+          }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "azurerm_virtual_network.hub",
+      "mode": "managed",
+      "type": "azurerm_virtual_network",
+      "name": "hub",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": {
+          "name": "vnet-hub",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "address_space": ["10.40.0.0/17"]
+        },
+        "after": {
+          "name": "vnet-hub",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "address_space": ["10.40.0.0/16"]
+        },
+        "before_sensitive": {},
+        "after_sensitive": {}
+      }
+    },
+    {
+      "address": "azurerm_subnet.app",
+      "mode": "managed",
+      "type": "azurerm_subnet",
+      "name": "app",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["no-op"],
+        "before": {
+          "name": "snet-app",
+          "virtual_network_name": "vnet-hub",
+          "address_prefixes": ["10.40.1.0/24"]
+        },
+        "after": {
+          "name": "snet-app",
+          "virtual_network_name": "vnet-hub",
+          "address_prefixes": ["10.40.1.0/24"]
+        }
+      }
+    },
+    {
+      "address": "azurerm_subnet.data",
+      "mode": "managed",
+      "type": "azurerm_subnet",
+      "name": "data",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "snet-data",
+          "virtual_network_name": "vnet-hub",
+          "address_prefixes": ["10.40.2.0/24"]
+        }
+      }
+    },
+    {
+      "address": "azurerm_service_plan.app",
+      "mode": "managed",
+      "type": "azurerm_service_plan",
+      "name": "app",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "plan-app", "sku_name": "P1v2" },
+        "after": { "name": "plan-app", "sku_name": "P1v3" }
+      }
+    },
+    {
+      "address": "module.app.azurerm_linux_web_app.api",
+      "mode": "managed",
+      "module_address": "module.app",
+      "type": "azurerm_linux_web_app",
+      "name": "api",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "app-api",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "virtual_network_subnet_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Network/virtualNetworks/vnet-hub/subnets/snet-app",
+          "site_credential": "p@ssw0rd-should-never-render"
+        },
+        "before_sensitive": {},
+        "after_sensitive": {
+          "site_credential": true
+        }
+      }
+    },
+    {
+      "address": "azurerm_kubernetes_cluster.platform",
+      "mode": "managed",
+      "type": "azurerm_kubernetes_cluster",
+      "name": "platform",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {
+          "name": "aks-platform",
+          "kubernetes_version": "1.28.3",
+          "kube_admin_config_raw": "kubeconfig-should-never-render"
+        },
+        "after": {
+          "name": "aks-platform",
+          "kubernetes_version": "1.30.0",
+          "kube_admin_config_raw": "kubeconfig-should-never-render"
+        },
+        "before_sensitive": { "kube_admin_config_raw": true },
+        "after_sensitive": { "kube_admin_config_raw": true }
+      }
+    },
+    {
+      "address": "azurerm_storage_account.assets",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "assets",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "stassetsnew",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "primary_access_key": "key-should-never-render"
+        },
+        "after_sensitive": { "primary_access_key": true }
+      }
+    },
+    {
+      "address": "azurerm_redis_cache.session",
+      "mode": "managed",
+      "type": "azurerm_redis_cache",
+      "name": "session",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["no-op"],
+        "before": { "name": "redis-session", "sku_name": "Standard" },
+        "after": { "name": "redis-session", "sku_name": "Standard" }
+      }
+    },
+    {
+      "address": "azurerm_storage_account.legacy",
+      "mode": "managed",
+      "type": "azurerm_storage_account",
+      "name": "legacy",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "stassetslegacy",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "account_tier": "Standard",
+          "primary_access_key": "legacy-key-should-never-render"
+        },
+        "after": null,
+        "before_sensitive": { "primary_access_key": true }
+      }
+    },
+    {
+      "address": "azurerm_private_endpoint.legacy_storage",
+      "mode": "managed",
+      "type": "azurerm_private_endpoint",
+      "name": "legacy_storage",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "pe-legacy-storage",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "subnet_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Network/virtualNetworks/vnet-hub/subnets/snet-app",
+          "private_service_connection": [
+            {
+              "name": "pe-legacy-storage",
+              "private_connection_resource_id": "/subscriptions/cloudhorus-subscription/resourceGroups/cloudhorus-rg-1/providers/Microsoft.Storage/storageAccounts/stassetslegacy",
+              "subresource_names": ["blob"]
+            }
+          ]
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "azurerm_mssql_server.reporting",
+      "mode": "managed",
+      "type": "azurerm_mssql_server",
+      "name": "reporting",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "name": "sql-reporting",
+          "location": "westeurope",
+          "resource_group_name": "cloudhorus-rg-1",
+          "administrator_login": "sqladmin",
+          "administrator_login_password": "password-should-never-render"
+        },
+        "after": null,
+        "before_sensitive": { "administrator_login_password": true }
+      }
+    },
+    {
+      "address": "azurerm_route_table.egress",
+      "mode": "managed",
+      "type": "azurerm_route_table",
+      "name": "egress",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "rt-egress" },
+        "after": { "name": "rt-egress" }
+      }
+    },
+    {
+      "address": "azurerm_key_vault.secrets",
+      "mode": "managed",
+      "type": "azurerm_key_vault",
+      "name": "secrets",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["update"],
+        "before": { "name": "kv-platform", "sku_name": "standard" },
+        "after": { "name": "kv-platform", "sku_name": "premium" }
+      }
+    },
+    {
+      "address": "data.azurerm_client_config.current",
+      "mode": "data",
+      "type": "azurerm_client_config",
+      "name": "current",
+      "provider_name": "registry.terraform.io/hashicorp/azurerm",
+      "change": {
+        "actions": ["read"],
+        "before": null,
+        "after": null
+      }
+    },
+    {
+      "address": "random_password.sql",
+      "mode": "managed",
+      "type": "random_password",
+      "name": "sql",
+      "provider_name": "registry.terraform.io/hashicorp/random",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": { "length": 24 },
+        "after_sensitive": { "result": true }
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "azurerm_virtual_network.hub",
+          "mode": "managed",
+          "type": "azurerm_virtual_network",
+          "name": "hub",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "name": { "constant_value": "vnet-hub" }
+          }
+        },
+        {
+          "address": "azurerm_subnet.app",
+          "mode": "managed",
+          "type": "azurerm_subnet",
+          "name": "app",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "virtual_network_name": {
+              "references": ["azurerm_virtual_network.hub.name", "azurerm_virtual_network.hub"]
+            }
+          }
+        },
+        {
+          "address": "azurerm_subnet.data",
+          "mode": "managed",
+          "type": "azurerm_subnet",
+          "name": "data",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "virtual_network_name": {
+              "references": ["azurerm_virtual_network.hub.name", "azurerm_virtual_network.hub"]
+            }
+          }
+        },
+        {
+          "address": "azurerm_kubernetes_cluster.platform",
+          "mode": "managed",
+          "type": "azurerm_kubernetes_cluster",
+          "name": "platform",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "default_node_pool": [
+              {
+                "vnet_subnet_id": {
+                  "references": ["azurerm_subnet.app.id", "azurerm_subnet.app"]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "address": "azurerm_storage_account.assets",
+          "mode": "managed",
+          "type": "azurerm_storage_account",
+          "name": "assets",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "name": { "constant_value": "stassetsnew" }
+          }
+        },
+        {
+          "address": "azurerm_private_endpoint.legacy_storage",
+          "mode": "managed",
+          "type": "azurerm_private_endpoint",
+          "name": "legacy_storage",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "subnet_id": {
+              "references": ["azurerm_subnet.app.id", "azurerm_subnet.app"]
+            }
+          }
+        },
+        {
+          "address": "azurerm_mssql_server.reporting",
+          "mode": "managed",
+          "type": "azurerm_mssql_server",
+          "name": "reporting",
+          "provider_config_key": "azurerm",
+          "expressions": {
+            "administrator_login_password": {
+              "references": ["random_password.sql.result", "random_password.sql"]
+            }
+          }
+        }
+      ],
+      "module_calls": {
+        "app": {
+          "source": "./modules/app",
+          "module": {
+            "resources": [
+              {
+                "address": "azurerm_linux_web_app.api",
+                "mode": "managed",
+                "type": "azurerm_linux_web_app",
+                "name": "api",
+                "provider_config_key": "azurerm",
+                "expressions": {
+                  "service_plan_id": {
+                    "references": ["azurerm_service_plan.app.id", "azurerm_service_plan.app"]
+                  },
+                  "virtual_network_subnet_id": {
+                    "references": ["azurerm_subnet.app.id", "azurerm_subnet.app"]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

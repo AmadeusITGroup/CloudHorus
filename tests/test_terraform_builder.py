@@ -1,5 +1,7 @@
 """Tests for Terraform JSON normalization into local template resources."""
 
+import pytest
+
 from core.terraform_builder import TerraformTemplateBuilder
 
 
@@ -217,3 +219,47 @@ def test_terraform_builder_maps_aks_and_sql_resources() -> None:
 
     sql = resources["Microsoft.Sql/servers:test-sql-data"]
     assert sql["type"] == "Microsoft.Sql/servers"
+
+
+@pytest.mark.parametrize(
+    ("content", "type_name"),
+    [
+        ("null", "NoneType"),
+        ("[]", "list"),
+        ("[1, 2, 3]", "list"),
+        ("42", "int"),
+        ("3.5", "float"),
+        ('"plan"', "str"),
+        ("true", "bool"),
+    ],
+)
+def test_load_terraform_json_rejects_non_object_documents(tmp_path, content: str, type_name: str) -> None:
+    """A Plan_File holding valid JSON that is not an object raises ValueError naming the type.
+
+    Requirement 9.9: every Plan_File content that parses as JSON either yields a
+    Change_Model or fails with `ValueError`, never another exception type.
+    """
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(content, encoding="utf-8")
+
+    builder = TerraformTemplateBuilder()
+
+    with pytest.raises(ValueError) as error:
+        builder.load_terraform_json(str(plan_file))
+
+    assert type_name in str(error.value)
+
+
+def test_build_terraform_template_reports_non_object_plan_file(tmp_path) -> None:
+    """The build path reports a non-object Plan_File instead of crashing.
+
+    Requirement 12.8: the builder's error path returns `None` and writes no template.
+    """
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text("[]", encoding="utf-8")
+    output_file = tmp_path / "template.json"
+
+    result = TerraformTemplateBuilder().build_terraform_template(str(plan_file), str(output_file))
+
+    assert result is None
+    assert not output_file.exists()

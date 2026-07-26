@@ -1,16 +1,26 @@
+import base64
+import html
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import graphviz
 from graphviz import Digraph
 from graphviz.backend.execute import ExecutableNotFound
 from tqdm import tqdm
 
+from utils.change_style import (
+    CHANGE_STYLES,
+    cluster_style_attributes,
+    decorate_cluster_label,
+    legend_label,
+    resolve_style,
+)
 from utils.geticons import ICONS_DIR, get_icon
 from utils.graph_utils import add_node_in_subgraph, should_skip, should_skip_dependency
 from utils.heartbeat import Heartbeat
@@ -32,10 +42,537 @@ from .azure_cli import (
     login_to_tenant,
 )
 from .bicep_builder import build_bicep_template
+from .plan_diff import (
+    CHANGE_CATEGORIES,
+    NO_RESOURCE_ENTRY_REASON,
+    UNCHANGED_CATEGORY,
+    UNDISPLAYED_REASONS,
+    ChangeSummary,
+    UndisplayedChange,
+    format_change_summary,
+)
 from .terraform_builder import TerraformTemplateBuilder, build_terraform_template
 from .resource_processor import get_cross_resource_group_dependencies, get_subnet_implicit_dependencies
 
 logger = SingletonLogger().get_logger()
+
+#: Key of the per-template change index: (resource name, renderer resource type).
+ChangeIndexKey = Tuple[str, str]
+
+
+def build_change_index(template_data: Any) -> Dict[ChangeIndexKey, str]:
+    """Index the `changeCategory` of one registered template by (name, type).
+
+    The subnet placement loop of the render pass works from `dependencies` keys
+    rather than from resource dicts, so it needs this lookup to recover the
+    Change_Category of a resource it is about to place inside a subnet.
+
+    Legacy templates carry no `changeCategory`, which yields an empty index and
+    therefore Legacy_Mode styling everywhere (Requirement 4.5).
+    """
+    index: Dict[ChangeIndexKey, str] = {}
+    if not isinstance(template_data, dict):
+        return index
+
+    resources = template_data.get("resources")
+    if not isinstance(resources, list):
+        return index
+
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        category = resource.get("changeCategory")
+        if not isinstance(category, str) or not category:
+            continue
+        name = resource.get("name")
+        resource_type = resource.get("type")
+        if not isinstance(name, str) or not isinstance(resource_type, str):
+            continue
+        index[(name, resource_type)] = category
+
+    return index
+
+
+#: Renderer resource type of a subnet. Its `name` in the Renderer_Template is the
+#: compound `"<vnet>/<subnet>"`, while the render pass works from the bare subnet
+#: name, hence `resolve_subnet_change_category`.
+SUBNET_RENDERER_TYPE: str = "Microsoft.Network/virtualNetworks/subnets"
+
+
+def resolve_subnet_change_category(
+    change_index: Dict[ChangeIndexKey, str],
+    vnet_name: str,
+    subnet_name: str,
+) -> Optional[str]:
+    """Return the Change_Category of a subnet cluster, or None when it has none.
+
+    `build_change_index` keys a subnet by the name the Renderer_Template carries,
+    which the Terraform builder writes as the compound `"<vnet>/<subnet>"`. The
+    render pass only holds the bare subnet name, so the compound key is tried
+    first and the bare name second, which covers a template that names its
+    subnets without their virtual network.
+    """
+    if not change_index or not subnet_name:
+        return None
+
+    compound = f"{vnet_name}/{subnet_name}" if vnet_name else subnet_name
+    category = change_index.get((compound, SUBNET_RENDERER_TYPE))
+    if category is None:
+        category = change_index.get((subnet_name, SUBNET_RENDERER_TYPE))
+    return category
+
+
+def apply_cluster_change_style(
+    label: str,
+    attributes: Dict[str, str],
+    change_category: Optional[str],
+) -> Tuple[str, Dict[str, str]]:
+    """Merge the Change_Style of a container cluster into its legacy attributes.
+
+    VNets and subnets render as Graphviz clusters rather than nodes, so they never
+    reach `add_node_in_subgraph` and need the decoration applied here: the
+    Flag_Token goes into the HTML table label and the colour tokens replace the
+    legacy `color`/`bgcolor`, with a thicker border (Requirements 5.1-5.4, 5.9).
+    The flag lands in the cell naming the container rather than in the first cell,
+    because the first cell of a cluster label holds the container icon and
+    Graphviz refuses a cell that mixes an image with text.
+
+    A category of `None`, `unchanged`, or an out-of-set value returns the label
+    and the attribute mapping unchanged, so Legacy_Mode DOT stays byte-identical
+    (Requirement 5.5).
+    """
+    style = resolve_style(change_category)
+    if style is None:
+        return label, attributes
+
+    decorated = dict(attributes)
+    decorated.update(cluster_style_attributes(style))
+    return decorate_cluster_label(label, style), decorated
+
+
+def style_subnet_cluster(
+    subnet_subgraph: Any,
+    subnet_name: str,
+    subnet_cidr: Any,
+    vnet_name: str,
+    change_index: Dict[ChangeIndexKey, str],
+) -> None:
+    """Emit the cluster attributes of one subnet subgraph, decoration included.
+
+    The render pass opens `cluster_subnet<name>` from four different places; all
+    four emit the same label and the same legacy attributes, so they share this
+    helper rather than repeating the block.
+    """
+    label = (
+        "<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'>"
+        f"<TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD>"
+        f"<TD align='left'>{subnet_name}</TD></TR>"
+        f"<TR><TD align='left'>CIDR: {subnet_cidr}</TD></TR></TABLE>>"
+    )
+    label, attributes = apply_cluster_change_style(
+        label,
+        {"style": "dashed", "fontsize": "30", "color": "black", "bgcolor": "whitesmoke"},
+        resolve_subnet_change_category(change_index, vnet_name, subnet_name),
+    )
+    subnet_subgraph.attr(label=label, **attributes)
+
+
+def accumulate_change_metadata(
+    template_data: Any,
+    aggregate_counts: Dict[str, int],
+    aggregate_summary: List[Any],
+) -> None:
+    """Fold the change metadata of one template into the run-level aggregates.
+
+    `aggregate_counts` holds one entry per Change_Category as soon as a single
+    template reports change counts, so its truthiness is the Plan_Diff_Mode
+    signal the Legend and the Change_Summary guard on. `aggregate_summary`
+    collects the `changesNotDisplayed` entries of every template.
+    """
+    if not isinstance(template_data, dict):
+        return
+
+    metadata = template_data.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+
+    counts = metadata.get("changeCounts")
+    if isinstance(counts, dict):
+        for category in CHANGE_CATEGORIES:
+            value = counts.get(category, 0)
+            if isinstance(value, bool) or not isinstance(value, int):
+                value = 0
+            aggregate_counts[category] = aggregate_counts.get(category, 0) + value
+
+    not_displayed = metadata.get("changesNotDisplayed")
+    if isinstance(not_displayed, list):
+        aggregate_summary.extend(not_displayed)
+
+
+def has_rendered_changes(aggregate_counts: Dict[str, int]) -> bool:
+    """Return True when the run carries at least one non-`unchanged` category.
+
+    Consumed by the Legend cluster (task 7.4) and the Change_Summary reporting
+    (task 7.6) so both guard on the same condition (Requirements 5.7, 5.8).
+    """
+    return any(count > 0 for category, count in aggregate_counts.items() if category != UNCHANGED_CATEGORY)
+
+
+#: Filename suffix of the Change_Summary sidecar written next to the PNG.
+CHANGE_SUMMARY_SUFFIX: str = ".change-summary.json"
+
+
+def build_run_change_summary(aggregate_counts: Dict[str, int], aggregate_summary: List[Any]) -> ChangeSummary:
+    """Fold the run-level aggregates into the Change_Summary of the whole run.
+
+    The aggregates are what survives the render pass: `aggregate_counts` sums
+    the per-template `changeCounts`, and `aggregate_summary` concatenates the
+    per-template `changesNotDisplayed` payloads. Rebuilding a
+    :class:`~core.plan_diff.ChangeSummary` from them keeps one console format
+    and one sidecar payload for the run instead of one per template
+    (Requirement 7.1).
+
+    Malformed entries are dropped rather than raised on, and an address is
+    reported once even when several templates carry it.
+    """
+    not_displayed: List[UndisplayedChange] = []
+    seen: set = set()
+    for entry in aggregate_summary or []:
+        if not isinstance(entry, dict):
+            continue
+        address = entry.get("address")
+        if not isinstance(address, str) or not address or address in seen:
+            continue
+        seen.add(address)
+        terraform_type = entry.get("terraformType")
+        category = entry.get("category")
+        reason = entry.get("reason")
+        not_displayed.append(
+            UndisplayedChange(
+                address=address,
+                terraform_type=terraform_type if isinstance(terraform_type, str) else "",
+                category=category if category in CHANGE_CATEGORIES else UNCHANGED_CATEGORY,
+                reason=reason if reason in UNDISPLAYED_REASONS else NO_RESOURCE_ENTRY_REASON,
+            )
+        )
+
+    present_categories = [category for category in CHANGE_CATEGORIES if aggregate_counts.get(category, 0) > 0]
+    return ChangeSummary(
+        counts=dict(aggregate_counts),
+        present_categories=present_categories,
+        not_displayed=not_displayed,
+    )
+
+
+def change_styles_payload() -> Dict[str, Optional[Dict[str, str]]]:
+    """Return the Change_Style table in JSON form for the sidecar consumers.
+
+    The WebUI colours its filter chips from this block, so the sidecar carries
+    the same colour and Flag_Token the Legend and the node labels use.
+    `unchanged` is explicitly `null`: styleless is a table entry, not a gap.
+    """
+    payload: Dict[str, Optional[Dict[str, str]]] = {}
+    for category in CHANGE_CATEGORIES:
+        style = CHANGE_STYLES.get(category)
+        payload[category] = None if style is None else {"color": style.color, "flag": style.flag, "label": style.label}
+    return payload
+
+
+def write_change_summary_sidecar(summary: ChangeSummary, output_filename: str) -> Optional[str]:
+    """Write `azure_resources_<timestamp>.change-summary.json` beside the PNG.
+
+    `output_filename` is the extension-less PNG path, so the sidecar lands in
+    the existing output folder next to the diagram and shares its timestamp
+    (Requirement 7.5). A write failure is degraded to a warning: the diagram is
+    already on disk and the summary is also on the console, so the run must not
+    fail over the sidecar.
+    """
+    sidecar_path = f"{output_filename}{CHANGE_SUMMARY_SUFFIX}"
+    payload = summary.to_payload()
+    payload["changeStyles"] = change_styles_payload()
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as error:
+        logger.warning(f"Could not write the change summary sidecar {sidecar_path}: {error}")
+        return None
+
+    logger.info(f"Saved change summary: {os.path.abspath(sidecar_path)}")
+    return sidecar_path
+
+
+#: Flag_Tokens the Change_Style table can prepend to a node label. Longest
+#: first, so a multi-character token is stripped before a single-character one.
+_CHANGE_FLAGS: Tuple[str, ...] = tuple(
+    sorted((style.flag for style in CHANGE_STYLES.values() if style is not None), key=len, reverse=True)
+)
+
+#: A quoted identifier followed by an attribute list. The DOT written for the
+#: Draw.io export goes through ``unflatten``, which pretty-prints one attribute
+#: per line, so the statement must be matched across line breaks rather than
+#: anchored to a single line.
+_DOT_NODE_STATEMENT_RE = re.compile(r'"(?P<node_id>[^"\n]+)"[ \t\r\n]*\[(?P<attrs>[^\[\]]*)\]', re.DOTALL)
+_DOT_FIRST_CELL_RE = re.compile(r"<TR><TD[^>]*>(?P<cell>.*?)</TD></TR>", re.IGNORECASE | re.DOTALL)
+_DOT_IMAGE_ATTR_RE = re.compile(r'image="(?P<path>[^"]+)"')
+_DOT_BORDER_COLOR_ATTR_RE = re.compile(r'(?<!fill)color="(?P<value>#[0-9A-Fa-f]{3,8})"')
+_DOT_FILL_COLOR_ATTR_RE = re.compile(r'fillcolor="(?P<value>#[0-9A-Fa-f]{3,8})"')
+_DOT_PENWIDTH_ATTR_RE = re.compile(r'penwidth="?(?P<value>[0-9.]+)"?')
+
+#: Cluster header and the two forms its attributes take. Graphviz writes them as
+#: bare assignments on the line after the header; ``unflatten`` rewrites the same
+#: attributes into a ``graph [ ... ]`` block spread over several lines, and the
+#: Draw.io export reads the unflattened source, so both forms are matched.
+_DOT_CLUSTER_HEADER_RE = re.compile(r'subgraph[ \t]+"?(?P<name>cluster_[^"\n{]*?)"?[ \t]*\{')
+_DOT_CLUSTER_GRAPH_ATTRS_RE = re.compile(r"[ \t\r\n]*graph[ \t\r\n]*\[(?P<attrs>[^\[\]]*)\]", re.DOTALL)
+#: ``color`` of a cluster, excluding ``bgcolor`` and ``fillcolor``.
+_DOT_CLUSTER_COLOR_ATTR_RE = re.compile(r'(?<![A-Za-z])color="(?P<value>#[0-9A-Fa-f]{3,8})"')
+_DOT_CLUSTER_BGCOLOR_ATTR_RE = re.compile(r'bgcolor="(?P<value>#[0-9A-Fa-f]{3,8})"')
+#: A single HTML table cell of a label, used to find the cell naming a cluster.
+_DOT_TABLE_CELL_RE = re.compile(r"<TD[^>]*>(?P<cell>.*?)</TD>", re.IGNORECASE | re.DOTALL)
+_LABEL_SEGMENT_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_MARKUP_RE = re.compile(r"<[^>]*>")
+
+#: Style prefix graphviz2drawio produces for an icon node. Re-applied to node
+#: cells whose icon the converter dropped, so a change-decorated node keeps the
+#: shape and icon it has without Plan_Diff_Mode (Requirement 8.6).
+_NODE_ICON_STYLE = (
+    "shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;aspect=fixed;imageAspect=0;image={icon};"
+)
+
+
+def _label_resource_name(markup: str) -> str:
+    """Return the resource name carried by an HTML-ish node label.
+
+    Markup is dropped, the label is split on its line breaks, and a leading
+    Flag_Token is removed, so the decorated and the undecorated form of the same
+    node label both yield the bare resource name.
+    """
+    for segment in _LABEL_SEGMENT_RE.split(markup):
+        text = " ".join(html.unescape(_MARKUP_RE.sub(" ", segment)).split())
+        if not text or text in _CHANGE_FLAGS:
+            continue
+        for flag in _CHANGE_FLAGS:
+            if text.startswith(f"{flag} "):
+                text = text[len(flag) :].strip()
+                break
+        if text:
+            return text
+    return ""
+
+
+def _resolve_node_key(markup: str, keys: Iterable[str]) -> str:
+    """Return the DOT node key a Draw.io cell label belongs to.
+
+    ``_label_resource_name`` yields the bare resource name when the label keeps
+    its line breaks. graphviz2drawio does not always keep them: a node whose
+    label it reads as a single run of text produces ``"<name> <short type>"``, so
+    an exact lookup misses. The longest key the label text starts with is
+    therefore accepted as well, which is unambiguous because the remainder is the
+    resource type rather than more of the name.
+    """
+    text = _label_resource_name(markup)
+    if not text:
+        return ""
+
+    keys = list(keys)
+    if text in keys:
+        return text
+
+    candidates = [key for key in keys if key and text.startswith(f"{key} ")]
+    return max(candidates, key=len) if candidates else ""
+
+
+def _iter_dot_node_attributes(dot_source: str) -> Iterable[str]:
+    """Yield the attribute list of every node declaration in a DOT source.
+
+    Edge statements end in the same ``"id" [attrs]`` shape, so a match whose
+    identifier is preceded by ``->`` is an edge target rather than a node
+    declaration and is skipped.
+    """
+    for match in _DOT_NODE_STATEMENT_RE.finditer(dot_source):
+        if dot_source[: match.start()].rstrip().endswith("->"):
+            continue
+        yield match.group("attrs")
+
+
+def _dot_node_icons(dot_source: str) -> Dict[str, List[str]]:
+    """Map the resource name of every DOT node statement to its icon paths."""
+    icons: Dict[str, List[str]] = {}
+    for attributes in _iter_dot_node_attributes(dot_source):
+        image = _DOT_IMAGE_ATTR_RE.search(attributes)
+        if image is None:
+            continue
+        cell = _DOT_FIRST_CELL_RE.search(attributes)
+        name = _label_resource_name(cell.group("cell")) if cell is not None else ""
+        if not name:
+            continue
+        paths = icons.setdefault(name, [])
+        if image.group("path") not in paths:
+            paths.append(image.group("path"))
+    return icons
+
+
+def _dot_node_decorations(dot_source: str) -> Dict[str, Dict[str, str]]:
+    """Map the resource name of every decorated DOT node to its Draw.io style keys.
+
+    The Change_Style decoration lives in the node attributes (``color``,
+    ``fillcolor``, ``penwidth``). graphviz2drawio reads a node carrying an
+    ``image`` as a pure icon cell and emits ``strokeColor=none;fillColor=none``,
+    dropping it, so the decoration is translated here and re-applied to the cell
+    (Requirement 8.7).
+    """
+    decorations: Dict[str, Dict[str, str]] = {}
+    for attributes in _iter_dot_node_attributes(dot_source):
+        border = _DOT_BORDER_COLOR_ATTR_RE.search(attributes)
+        if border is None:
+            continue
+        cell = _DOT_FIRST_CELL_RE.search(attributes)
+        name = _label_resource_name(cell.group("cell")) if cell is not None else ""
+        if not name or name in decorations:
+            continue
+        style = {"strokeColor": border.group("value")}
+        fill = _DOT_FILL_COLOR_ATTR_RE.search(attributes)
+        if fill is not None:
+            style["fillColor"] = fill.group("value")
+        penwidth = _DOT_PENWIDTH_ATTR_RE.search(attributes)
+        if penwidth is not None:
+            style["strokeWidth"] = penwidth.group("value")
+        decorations[name] = style
+    return decorations
+
+
+def _iter_dot_cluster_attributes(dot_source: str) -> Iterable[Tuple[str, str]]:
+    """Yield ``(cluster name, attribute text)`` for every cluster of a DOT source.
+
+    Graphviz emits cluster attributes as bare assignments on the line following
+    the ``subgraph`` header, while ``unflatten`` rewrites them into a multi-line
+    ``graph [ ... ]`` block. Both are yielded as one flat attribute string. A
+    cluster that opens straight onto a node or a nested subgraph carries no
+    attributes and yields nothing, so a decorated node statement is never read as
+    its enclosing cluster's attributes.
+    """
+    for match in _DOT_CLUSTER_HEADER_RE.finditer(dot_source):
+        rest = dot_source[match.end() :]
+        block = _DOT_CLUSTER_GRAPH_ATTRS_RE.match(rest)
+        if block is not None:
+            yield match.group("name"), block.group("attrs")
+            continue
+        lines = rest.split("\n", 2)
+        candidate = lines[1] if len(lines) > 1 else ""
+        if "[" in candidate or "{" in candidate:
+            continue
+        yield match.group("name"), candidate
+
+
+def _dot_cluster_decorations(dot_source: str) -> Dict[str, Dict[str, str]]:
+    """Map every change-decorated cluster to its Draw.io style keys.
+
+    A VNet or a subnet renders as a Graphviz cluster, so its Change_Style lives in
+    the cluster attributes (``color``, ``bgcolor``, ``penwidth``). The Draw.io
+    cluster cell is rebuilt from a fixed style string, which would drop the change
+    state; it is translated here and re-applied to the container cell, exactly as
+    node decorations already are (Requirements 8.6, 8.7).
+    """
+    decorations: Dict[str, Dict[str, str]] = {}
+    for name, attributes in _iter_dot_cluster_attributes(dot_source):
+        border = _DOT_CLUSTER_COLOR_ATTR_RE.search(attributes)
+        if border is None or name in decorations:
+            continue
+        style = {"strokeColor": border.group("value")}
+        fill = _DOT_CLUSTER_BGCOLOR_ATTR_RE.search(attributes)
+        if fill is not None:
+            style["fillColor"] = fill.group("value")
+            style["fillOpacity"] = "100"
+        penwidth = _DOT_PENWIDTH_ATTR_RE.search(attributes)
+        if penwidth is not None:
+            style["strokeWidth"] = penwidth.group("value")
+        decorations[name] = style
+    return decorations
+
+
+#: Flag_Tokens a decorated label opens with, stripped when a cluster label is
+#: reduced to the text that identifies it.
+_FLAG_TOKENS: str = "".join(style.flag for style in CHANGE_STYLES.values() if style is not None)
+
+
+def _cluster_label_text(attributes: str) -> str:
+    """Return the text identifying a cluster, taken from its label.
+
+    The first cell of a cluster label holds the container icon, so the first cell
+    that is not an image cell is the one naming the container ("Name :core-vnet",
+    "app"). The Flag_Token a decoration prepends is stripped, so the same text
+    identifies the cluster before and after decoration.
+    """
+    for match in _DOT_TABLE_CELL_RE.finditer(attributes):
+        content = match.group("cell")
+        if "<img" in content.lower():
+            continue
+        text = _MARKUP_RE.sub("", content).strip().lstrip(_FLAG_TOKENS).strip()
+        if text:
+            return text
+    return ""
+
+
+def _dot_cluster_label_texts(dot_source: str) -> Dict[str, str]:
+    """Map every cluster of a DOT source to the text identifying it."""
+    texts: Dict[str, str] = {}
+    for name, attributes in _iter_dot_cluster_attributes(dot_source):
+        if name in texts:
+            continue
+        text = _cluster_label_text(attributes)
+        if text:
+            texts[name] = text
+    return texts
+
+
+def _resolve_cluster_decoration(
+    cell_text: str,
+    decorations: Dict[str, Dict[str, str]],
+    label_texts: Dict[str, str],
+) -> Dict[str, str]:
+    """Return the decoration of the cluster a Draw.io container cell belongs to.
+
+    The cluster cells are matched by their label text rather than by the
+    ``clustN`` order: a cluster that the render pass re-opens appears several
+    times in the DOT but only once in the converter output, so the positional
+    mapping the surrounding code uses does not line up with the cells. An
+    ambiguous match (two containers with the same label) yields no decoration
+    rather than a guess.
+    """
+    if not cell_text:
+        return {}
+    matches = [
+        decorations[name]
+        for name, text in label_texts.items()
+        if name in decorations and text and text in cell_text
+    ]
+    if len(matches) != 1:
+        return {}
+    return matches[0]
+
+
+def _apply_drawio_style_keys(style: str, keys: Dict[str, str]) -> str:
+    """Replace or append Draw.io style keys on an existing style string."""
+    for key, value in keys.items():
+        style = re.sub(rf"{key}=[^;]*;?", "", style)
+        if style and not style.endswith(";"):
+            style += ";"
+        style += f"{key}={value};"
+    return style
+
+
+def _icon_data_uri(icon_path: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """Return an icon file as a base64 data URI, or None when it is unreadable."""
+    if icon_path in cache:
+        return cache[icon_path]
+    try:
+        with open(icon_path, "rb") as icon_file:
+            uri: Optional[str] = "data:image/png," + base64.b64encode(icon_file.read()).decode("utf-8")
+    except Exception as exc:
+        logger.warning(f"Failed to read/convert node icon {icon_path}: {exc}")
+        uri = None
+    cache[icon_path] = uri
+    return uri
 
 
 def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
@@ -393,6 +930,22 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
 
         logger.info(f"Recalculated geometry for {len(cluster_geoms)} clusters to ensure proper visual containment")
 
+        # Icons of every DOT node, used to restore the icon of node cells the
+        # converter emitted without one (Requirement 8.6).
+        node_icons = _dot_node_icons(dot_source)
+        icon_data_cache: Dict[str, Optional[str]] = {}
+
+        # Change decoration of every DOT node, used to re-apply the border and
+        # the background the converter drops on icon cells (Requirement 8.7).
+        node_decorations = _dot_node_decorations(dot_source)
+
+        # Change decoration of every VNet and subnet cluster, used to re-apply the
+        # border and the background over the fixed container style built below.
+        # The cells are matched by label text, not by the positional `clustN` map:
+        # a cluster the render pass re-opens is one cell but several DOT blocks.
+        cluster_decorations = _dot_cluster_decorations(dot_source)
+        cluster_label_texts = _dot_cluster_label_texts(dot_source)
+
         # Second pass: Update styling and geometry for cluster cells
         # IMPORTANT: Keep parent relationships flat (as set by graphviz2drawio) to preserve positioning
         # Only update visual styles (colors, fonts, icons)
@@ -474,6 +1027,20 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
                     style += f"fillColor={hex_color};fillOpacity=100;"
                     logger.debug(f"Applied bgcolor {bgcolor} ({hex_color}) to {cell_id}")
 
+                # Restore the change decoration of a VNet or subnet cluster: the
+                # container style above hardcodes a black one-point border, which
+                # would drop the Change_Style the DOT cluster carries. The colour
+                # tokens are re-applied here so the exported diagram shows the same
+                # change state as the rendered image (Requirements 8.6, 8.7).
+                cluster_decoration = _resolve_cluster_decoration(
+                    _MARKUP_RE.sub("", html.unescape(cell.get("value", ""))),
+                    cluster_decorations,
+                    cluster_label_texts,
+                )
+                if cluster_decoration:
+                    style = _apply_drawio_style_keys(style, cluster_decoration)
+                    logger.debug(f"Restored change decoration for {cell_id}: {cluster_decoration}")
+
                 cell.set("style", style)
 
                 # Increase cluster title font size and make bold (20px instead of 14px)
@@ -501,6 +1068,34 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
                 # BOTH verticalAlign=top AND verticalAlign=bottom (last one wins)
                 # We need: verticalLabelPosition=bottom + verticalAlign=top for close spacing
                 style = cell.get("style", "")
+
+                # Restore a dropped icon: a label carrying a visible border (the
+                # Change_Style decoration) makes graphviz2drawio read the node as
+                # a shape with an HTML label, so it emits no shape=image and no
+                # icon. The icon is in the DOT node attributes either way, so it
+                # is re-attached here, exactly as the cluster branch above does
+                # for nested clusters (Requirement 8.6).
+                node_value = cell.get("value", "")
+                if "image=" not in style:
+                    node_name = _resolve_node_key(node_value, node_icons)
+                    for icon_path in node_icons.get(node_name, []):
+                        icon_data = _icon_data_uri(icon_path, icon_data_cache)
+                        if icon_data:
+                            style = _NODE_ICON_STYLE.format(icon=icon_data) + style
+                            logger.debug(f"Restored icon for {cell_id} ({node_name}) from {icon_path}")
+                            break
+
+                # Restore the change decoration: graphviz2drawio reads a node
+                # carrying an icon as a pure image cell and emits
+                # strokeColor=none;fillColor=none, which drops the coloured
+                # border and the tinted background the DOT node carries. They are
+                # re-applied here so the exported diagram shows the same change
+                # state as the rendered image (Requirement 8.7).
+                node_name = _resolve_node_key(node_value, node_decorations)
+                decoration = node_decorations.get(node_name)
+                if decoration:
+                    style = _apply_drawio_style_keys(style, decoration)
+                    logger.debug(f"Restored change decoration for {cell_id} ({node_name}): {decoration}")
 
                 # Always fix nodes (whether they had top or bottom originally)
                 # Step 1: Change label position to bottom
@@ -962,6 +1557,7 @@ def generate_resource_graph(
     terraform_json_files=None,
     terraform_root_dirs=None,
     terraform_var_files=None,
+    change_types=None,
 ):
     """
     Generate Azure resource graph visualization.
@@ -993,6 +1589,7 @@ def generate_resource_graph(
         terraform_json_files: List of Terraform `show -json` files (required when local_template_mode is `terraform-json`)
         terraform_root_dirs: List of Terraform working directories (required when local_template_mode is `terraform-source`)
         terraform_var_files: List of Terraform var files aligned to terraform_root_dirs
+        change_types: Terraform plan Change_Categories to display (None = every category)
     """
     start_time = time.time()
 
@@ -1028,6 +1625,7 @@ def generate_resource_graph(
             terraform_var_files,
             start_time,
             _heartbeat,
+            change_types,
         )
     finally:
         _heartbeat.__exit__(None, None, None)
@@ -1058,8 +1656,18 @@ def _generate_resource_graph_inner(
     terraform_var_files,
     start_time,
     _heartbeat,
+    change_types=None,
 ):
     """Inner implementation of generate_resource_graph (wrapped by heartbeat)."""
+
+    # ── Plan_Diff_Mode state ──────────────────────────────────────────────
+    # `change_index` recovers the Change_Category of a resource from
+    # (name, type) at the subnet placement call site; the aggregates are the
+    # single source consumed by the Legend cluster and the Change_Summary.
+    # All three stay empty in Legacy_Modes.
+    change_index: Dict[ChangeIndexKey, str] = {}
+    aggregate_counts: Dict[str, int] = {}
+    aggregate_summary: List[Any] = []
 
     # Register local templates FIRST if in offline mode (before any Azure calls)
     if use_local_template:
@@ -1093,7 +1701,11 @@ def _generate_resource_graph_inner(
                 logger.info(
                     f"Building Terraform template {i+1}/{len(terraform_json_files)} from JSON: {terraform_json_file}"
                 )
-                template_file = build_terraform_template(terraform_json_file)
+                # `change_types` is a trailing optional builder parameter: it is only
+                # passed when the Operator made a selection, so a run without
+                # `--changeTypes` reaches the builder exactly as it did before.
+                builder_kwargs = {} if change_types is None else {"change_types": change_types}
+                template_file = build_terraform_template(terraform_json_file, **builder_kwargs)
                 if not template_file:
                     logger.error(f"Failed to build Terraform template {i+1}: {terraform_json_file}")
                     return
@@ -1108,6 +1720,11 @@ def _generate_resource_graph_inner(
                 except Exception as e:
                     logger.error(f"Error loading Terraform template {i+1}: {str(e)}")
                     return
+
+                # Plan diff state travels on the template dict itself; a plan without
+                # `resource_changes` carries none, which keeps Legacy_Mode behaviour.
+                change_index.update(build_change_index(template_data))
+                accumulate_change_metadata(template_data, aggregate_counts, aggregate_summary)
         elif local_template_mode == "terraform-source" and terraform_root_dirs:
             source_kind = "Terraform source directories"
             terraform_builder = TerraformTemplateBuilder()
@@ -1780,15 +2397,21 @@ def _generate_resource_graph_inner(
                                                             with resource_group.subgraph(
                                                                 name="cluster_vnet" + resource_name
                                                             ) as vnet_subgraph:
-                                                                vnet_subgraph.attr(
-                                                                    label=f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/Virtual-Networks.png' scale='true'/></TD><TD align='left'>Name :{resource_name}</TD></TR><TR><TD align='left'>CIDR: {vnet_cidr}</TD></TR></TABLE>>",
-                                                                    style="dashed",
-                                                                    fontsize="40",
-                                                                    color="black",
-                                                                    bgcolor="lightblue",
-                                                                    rankdir="TB",  # Top to bottom direction
-                                                                    ranksep="1.0",  # Increase separation between ranks
+                                                                # The VNet is a cluster, not a node, so its Change_Category
+                                                                # is decorated here rather than in `add_node_in_subgraph`.
+                                                                vnet_label, vnet_attributes = apply_cluster_change_style(
+                                                                    f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/Virtual-Networks.png' scale='true'/></TD><TD align='left'>Name :{resource_name}</TD></TR><TR><TD align='left'>CIDR: {vnet_cidr}</TD></TR></TABLE>>",
+                                                                    {
+                                                                        "style": "dashed",
+                                                                        "fontsize": "40",
+                                                                        "color": "black",
+                                                                        "bgcolor": "lightblue",
+                                                                        "rankdir": "TB",  # Top to bottom direction
+                                                                        "ranksep": "1.0",  # Separation between ranks
+                                                                    },
+                                                                    resource.get("changeCategory"),
                                                                 )
+                                                                vnet_subgraph.attr(label=vnet_label, **vnet_attributes)
                                                                 # add empty node for rank control
                                                                 vnet_subgraph.node(
                                                                     subscription_id + "invis",
@@ -1925,12 +2548,12 @@ def _generate_resource_graph_inner(
                                                                         with vnet_subgraph.subgraph(
                                                                             name="cluster_subnet" + subnet_name
                                                                         ) as subnet_subgraph:
-                                                                            subnet_subgraph.attr(
-                                                                                label=f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD><TD align='left'>{subnet_name}</TD></TR><TR><TD align='left'>CIDR: {subnet_cidr}</TD></TR></TABLE>>",
-                                                                                style="dashed",
-                                                                                fontsize="30",
-                                                                                color="black",
-                                                                                bgcolor="whitesmoke",
+                                                                            style_subnet_cluster(
+                                                                                subnet_subgraph,
+                                                                                subnet_name,
+                                                                                subnet_cidr,
+                                                                                resource_name,
+                                                                                change_index,
                                                                             )
                                                                             subnet_subgraph.node(
                                                                                 subnet_name,
@@ -2011,12 +2634,12 @@ def _generate_resource_graph_inner(
                                                                                         name="cluster_subnet"
                                                                                         + subnet_name
                                                                                     ) as subnet_subgraph:
-                                                                                        subnet_subgraph.attr(
-                                                                                            label=f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD><TD align='left'>{subnet_name}</TD></TR><TR><TD align='left'>CIDR: {subnet_cidr}</TD></TR></TABLE>>",
-                                                                                            style="dashed",
-                                                                                            fontsize="30",
-                                                                                            color="black",
-                                                                                            bgcolor="whitesmoke",
+                                                                                        style_subnet_cluster(
+                                                                                            subnet_subgraph,
+                                                                                            subnet_name,
+                                                                                            subnet_cidr,
+                                                                                            resource_name,
+                                                                                            change_index,
                                                                                         )
                                                                                         add_node_in_subgraph(
                                                                                             subnet_subgraph,
@@ -2024,6 +2647,12 @@ def _generate_resource_graph_inner(
                                                                                             subnet_resource_name,
                                                                                             subnet_resources_icon_path,
                                                                                             resource_type=resource_type,
+                                                                                            change_category=change_index.get(
+                                                                                                (
+                                                                                                    subnet_resource_name,
+                                                                                                    resource_type,
+                                                                                                )
+                                                                                            ),
                                                                                         )
                                                                                 if subnet_resource_name == subnet_name:
                                                                                     if (
@@ -2046,12 +2675,12 @@ def _generate_resource_graph_inner(
                                                                                             name="cluster_subnet"
                                                                                             + subnet_name
                                                                                         ) as subnet_subgraph:
-                                                                                            subnet_subgraph.attr(
-                                                                                                label=f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD><TD align='left'>{subnet_name}</TD></TR><TR><TD align='left'>CIDR: {subnet_cidr}</TD></TR></TABLE>>",
-                                                                                                style="dashed",
-                                                                                                fontsize="30",
-                                                                                                color="black",
-                                                                                                bgcolor="whitesmoke",
+                                                                                            style_subnet_cluster(
+                                                                                                subnet_subgraph,
+                                                                                                subnet_name,
+                                                                                                subnet_cidr,
+                                                                                                resource_name,
+                                                                                                change_index,
                                                                                             )
                                                                                             subnet_resources_icon_path = get_icon(
                                                                                                 dep_type
@@ -2099,12 +2728,12 @@ def _generate_resource_graph_inner(
                                                                             with vnet_subgraph.subgraph(
                                                                                 name="cluster_subnet" + subnet_name
                                                                             ) as subnet_subgraph:
-                                                                                subnet_subgraph.attr(
-                                                                                    label=f"<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'><TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD><TD align='left'>{subnet_name}</TD></TR><TR><TD align='left'>CIDR: {subnet_cidr}</TD></TR></TABLE>>",
-                                                                                    style="dashed",
-                                                                                    fontsize="30",
-                                                                                    color="black",
-                                                                                    bgcolor="whitesmoke",
+                                                                                style_subnet_cluster(
+                                                                                    subnet_subgraph,
+                                                                                    subnet_name,
+                                                                                    subnet_cidr,
+                                                                                    resource_name,
+                                                                                    change_index,
                                                                                 )
                                                                                 subnet_subgraph.node(
                                                                                     subnet_resource_name,
@@ -2171,6 +2800,7 @@ def _generate_resource_graph_inner(
                                                                 icon_path,
                                                                 resource_type=resource["type"],
                                                                 group=resourceGroup,
+                                                                change_category=resource.get("changeCategory"),
                                                             )
                                                             # progress update is handled by trailing res_pbar.update(1)
                                                     _iter_elapsed = time.time() - _iter_start
@@ -2449,6 +3079,43 @@ def _generate_resource_graph_inner(
                             minlen=str(minlen_value),
                         )
 
+    # ── Plan_Diff_Mode reporting ──────────────────────────────────────────
+    # `aggregate_counts` is non-empty exactly when a registered template
+    # reported change counts, so this is the Plan_Diff_Mode condition the
+    # Legend below guards on too. Legacy_Modes therefore log no Change_Summary
+    # and write no sidecar (Requirements 7.1, 7.6).
+    run_change_summary: Optional[ChangeSummary] = None
+    if use_local_template and local_template_mode == "terraform-json" and aggregate_counts:
+        run_change_summary = build_run_change_summary(aggregate_counts, aggregate_summary)
+        for line in format_change_summary(run_change_summary):
+            logger.info(line)
+
+    # Legend cluster: only in Plan_Diff_Mode and only when the run rendered at
+    # least one non-`unchanged` Change_Category, so Legacy_Modes and
+    # all-unchanged plans emit byte-identical DOT (Requirements 5.7, 5.8).
+    if (
+        use_local_template
+        and local_template_mode == "terraform-json"
+        and aggregate_counts
+        and has_rendered_changes(aggregate_counts)
+    ):
+        present_categories = [category for category in CHANGE_CATEGORIES if aggregate_counts.get(category, 0) > 0]
+        with dot.subgraph(name="cluster_change_legend") as legend_cluster:
+            legend_cluster.attr(
+                label="",
+                style="rounded,solid",
+                color="black",
+                bgcolor="white",
+                margin="10",
+            )
+            legend_cluster.node(
+                "change_legend",
+                label=legend_label(present_categories, aggregate_counts),
+                shape="none",
+                margin="0",
+                fontsize="20",
+            )
+
     dot.attr(
         splines="ortho",
         nodesep="0.1",
@@ -2513,6 +3180,12 @@ def _generate_resource_graph_inner(
     _heartbeat.update_phase("Rendering PNG")
     logger.info(f"Saving diagram as {output_filename}.png")
     dot.render(output_filename, format="png")
+
+    # Change_Summary sidecar, written beside the PNG so it shares the output
+    # folder and the timestamp of the diagram (Requirement 7.5). Only reached in
+    # Plan_Diff_Mode, since `run_change_summary` stays None otherwise.
+    if run_change_summary is not None:
+        write_change_summary_sidecar(run_change_summary, output_filename)
 
     # Export to Draw.io XML format if requested
     if exportDrawio:

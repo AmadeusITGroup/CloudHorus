@@ -77,6 +77,10 @@ test-data/
 /test_*.py
 /test_*.dot
 /azure_auth_prompt.txt
+/_*.txt
+/_*.py
+/_*.sh
+/_*.log
 
 # Pytest cache
 .pytest_cache/

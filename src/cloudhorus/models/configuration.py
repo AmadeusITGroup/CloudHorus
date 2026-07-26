@@ -80,6 +80,9 @@ class VisualizationConfig:
     terraform_var_files: Optional[List[str]] = None
     scope_metadata_files: Optional[List[str]] = None
 
+    # Terraform plan diff: Change_Categories to display (None = every category)
+    change_types: Optional[List[str]] = None
+
     def __post_init__(self):
         """Validate and initialize default values."""
         # Ensure optimizations list matches subscriptions

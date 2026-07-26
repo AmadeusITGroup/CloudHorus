@@ -1,5 +1,14 @@
 """Utilities package."""
 
+from .change_style import (
+    CHANGE_STYLES,
+    LEGEND_TITLE,
+    ChangeStyle,
+    decorate_label,
+    legend_label,
+    reset_style_warnings,
+    resolve_style,
+)
 from .graph_utils import GraphNodeBuilder, add_node_in_subgraph, get_node_builder
 from .icon_manager import IconManager, get_icon, get_icon_manager
 from .logger import CloudHorusLogger, SingletonLogger, get_logger
@@ -25,6 +34,13 @@ __all__ = [
     "IconManager",
     "get_icon",
     "get_icon_manager",
+    "CHANGE_STYLES",
+    "LEGEND_TITLE",
+    "ChangeStyle",
+    "decorate_label",
+    "legend_label",
+    "reset_style_warnings",
+    "resolve_style",
     "setup_windows_console",
     "safe_print",
     "remove_emojis_from_text",

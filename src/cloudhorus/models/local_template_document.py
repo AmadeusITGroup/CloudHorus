@@ -1,7 +1,7 @@
 """Provider-aware local template documents for offline rendering inputs."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -17,6 +17,7 @@ class LocalTemplateResource:
     depends_on: List[str] = field(default_factory=list)
     extra_fields: Dict[str, Any] = field(default_factory=dict)
     raw_values: Dict[str, Any] = field(default_factory=dict)
+    change_category: Optional[str] = None
 
     def to_renderer_resource(self) -> Dict[str, Any]:
         """Convert the normalized resource into the current renderer contract."""
@@ -30,6 +31,8 @@ class LocalTemplateResource:
         for key, value in self.extra_fields.items():
             if value is not None:
                 resource[key] = value
+        if self.change_category is not None:
+            resource["changeCategory"] = self.change_category
         return resource
 
 

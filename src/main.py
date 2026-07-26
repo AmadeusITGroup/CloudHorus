@@ -39,6 +39,7 @@ from core.local_input_metadata import (
     scope_lists_from_scopes,
     synthesize_scope_metadata,
 )
+from core.plan_diff import parse_change_types  # noqa: E402
 from utils.logger import SingletonLogger  # noqa: E402
 from utils.windows_encoding import setup_windows_console  # noqa: E402
 
@@ -216,6 +217,16 @@ def parse_arguments() -> argparse.Namespace:
         help=(
             "Optional list of scope metadata JSON files aligned to --terraformJsonFiles or --terraformRootDirs. "
             "Each file can contain either a top-level `scope` object or the same `_cloudHorus` metadata used by Bicep mode."
+        ),
+    )
+
+    parser.add_argument(
+        "--changeTypes",
+        nargs="+",
+        default=None,
+        help=(
+            "Terraform plan change categories to display: create update replace delete unchanged. "
+            "Defaults to every category."
         ),
     )
 
@@ -408,6 +419,12 @@ def main() -> None:
     has_terraform_source_input = bool(args.terraformRootDirs)
     local_template_modes_selected = sum([has_bicep_input, has_terraform_json_input, has_terraform_source_input])
 
+    # The plan/source pair gets its own message and is checked first, so the specific
+    # wording wins over the generic multi-mode message below (Requirement 1.5).
+    if has_terraform_json_input and has_terraform_source_input:
+        logger.error("Choose exactly one Terraform input: plan JSON or source directories")
+        exit(1)
+
     if local_template_modes_selected > 1:
         logger.error(
             "CloudHorus Error: choose exactly one local input mode: --bicepFiles, --terraformJsonFiles, or --terraformRootDirs."
@@ -422,6 +439,25 @@ def main() -> None:
         local_template_mode = "terraform-json"
     elif has_terraform_source_input:
         local_template_mode = "terraform-source"
+
+    # Terraform plan diff: validate `--changeTypes` before any generation work starts.
+    # `None` keeps the legacy behaviour of displaying every Change_Category (Requirement 8.3).
+    change_types: Optional[List[str]] = None
+    if args.changeTypes is not None:
+        try:
+            accepted_change_types = parse_change_types(args.changeTypes)
+        except ValueError as error:
+            logger.error(str(error))
+            exit(1)
+
+        if local_template_mode == "terraform-json":
+            change_types = accepted_change_types
+            logger.info(f"CloudHorus: Change type filter accepted: {' '.join(accepted_change_types)}")
+        else:
+            logger.warning(
+                "CloudHorus: --changeTypes applies to Terraform plan JSON input only "
+                "(--terraformJsonFiles); the selection is ignored for this run."
+            )
 
     if use_local_template:
         logger.info("CloudHorus: Template mode detected - analyzing architectural blueprints")
@@ -640,6 +676,7 @@ def main() -> None:
         terraform_root_dirs=args.terraformRootDirs if local_template_mode == "terraform-source" else None,
         terraform_var_files=args.terraformVarFiles if local_template_mode == "terraform-source" else None,
         scope_metadata_files=args.scopeMetadataFiles if use_local_template else None,
+        change_types=change_types,
     )
 
     # Initialize services with dependency injection
@@ -722,6 +759,7 @@ def main() -> None:
         terraform_json_files=config.terraform_json_files,
         terraform_root_dirs=config.terraform_root_dirs,
         terraform_var_files=config.terraform_var_files,
+        change_types=config.change_types,
     )
 
     if png_path is None:
