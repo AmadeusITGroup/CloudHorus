@@ -589,9 +589,19 @@ def diff_attributes(
        a value the plan will only know after apply reads as ``changed`` against
        its before value rather than as ``removed``.
 
-    The mask never introduces an Attribute_Path of its own: the entry set stays
-    the union of the two snapshots, so a mask that is wider than the resource
-    cannot invent rows the panel would have no values for.
+    The mask also contributes Attribute_Paths of its own. A path the mask flags
+    as an individual ``True`` leaf is an attribute the plan will know only after
+    apply, and for a ``create`` that is most of the resource: Terraform emits no
+    value for it, so it appears in neither snapshot, and taking only the union of
+    the two snapshots dropped it from the panel entirely. Such a path is emitted
+    with no Before_Value and the Unknown_Marker as its After_Value, which reads as
+    ``added`` — the same row `terraform plan` prints as ``(known after apply)``.
+
+    A flagged path that one of the snapshots already carries is not duplicated —
+    it keeps its own row and gets the Unknown_Marker as its After_Value through
+    override 2 above. Only a flagged path that neither snapshot carries becomes a
+    new row, so the entry set is the union of the two snapshots plus exactly the
+    attributes the plan says it cannot know yet (Requirement 6.6).
 
     Args:
         before: The before phase Config_Snapshot, already redacted.
@@ -608,8 +618,26 @@ def diff_attributes(
     flat_after = flatten_values(after, max_depth=max_depth, reasons=reasons)
     unknown_paths = _unknown_paths(unknown, max_depth=max_depth)
 
+    # An attribute the plan will only know after apply carries no value in either
+    # phase, so the union of the two snapshots omits it. Terraform still names it,
+    # and for a `create` most of the resource sits here, so the flagged paths that
+    # no snapshot carries join the entry set (Requirement 6.6).
+    #
+    # A flag that covers paths the snapshots *do* carry names no attribute of its
+    # own — it is a container flag, or the bare root flag, and override 2 above
+    # already applies it to every path beneath it. Adding a row for it would put a
+    # container's name in the panel next to the leaves it already marked.
+    known_paths = set(flat_before) | set(flat_after)
+    unknown_only = {
+        path
+        for path in unknown_paths
+        if path not in known_paths
+        and path != ROOT_PATH
+        and not any(covered.startswith(f"{path}.") for covered in known_paths)
+    }
+
     entries: List[AttributeEntry] = []
-    for path in sorted(set(flat_before) | set(flat_after)):
+    for path in sorted(set(flat_before) | set(flat_after) | unknown_only):
         before_text = (
             render_scalar(flat_before[path], max_chars=max_chars, reasons=reasons)
             if path in flat_before
@@ -906,6 +934,9 @@ class InspectorCollector:
     the same Inspector_Key the first record is retained, the duplicate is logged
     at warning level, and the collision counter that the Inspector_Index reports
     is incremented (Requirement 4.5).
+
+    An element whose source is ``None`` is not recorded at all: see the guard in
+    :meth:`_record` (Requirement 3.2).
     """
 
     def __init__(
@@ -967,6 +998,30 @@ class InspectorCollector:
             # key that is not usable text cannot be repaired here. Dropping it is a
             # warning rather than an exception (Requirement 1.9).
             logger.warning(f"Inspector element with an unusable Inspector_Key {key!r} was not recorded")
+            return
+
+        if source is None:
+            # The sourceless-record guard, and the only one: every call site funnels
+            # through here, so no call site carries its own version of this test.
+            #
+            # An element is only worth making activatable when the Inspector can
+            # describe it (Requirement 3.2). Some nodes the Diagram draws come from an
+            # Azure API lookup rather than from a Renderer_Template entry — a private
+            # DNS zone, a Bastion host, a route table reached through a subnet
+            # dependency — and in Live and Bicep mode the subject of that lookup may be
+            # absent from the exported resource list, so the source resolution misses
+            # and the caller hands over ``None``. Recording it anyway would produce an
+            # identity-only record with zero Attribute_Entry rows, and because the panel
+            # gates activatability on the Inspector_Index key set, the Operator would get
+            # a clickable element with an empty panel. Dropping the record instead leaves
+            # the element inert, which is the honest outcome.
+            #
+            # A caller that can *synthesize* a source — the aggregated private-DNS-zone
+            # node builds one from the zone list — passes that synthesized dict and is
+            # recorded normally. Debug rather than warning: a lookup subject missing from
+            # the resource list is expected in those modes, not an anomaly, and the
+            # message names the Inspector_Key so the gap is traceable.
+            logger.debug(f"No Inspector source for '{key}'; the element was left inert")
             return
 
         if key in self._keys:

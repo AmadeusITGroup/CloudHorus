@@ -244,6 +244,12 @@
         "before_sensitive": {},
         "after_sensitive": {
           "site_credential": true
+        },
+        "after_unknown": {
+          "id": true,
+          "default_hostname": true,
+          "outbound_ip_addresses": true,
+          "identity": [{ "principal_id": true, "tenant_id": true }]
         }
       }
     },
@@ -284,7 +290,12 @@
           "resource_group_name": "cloudhorus-rg-1",
           "primary_access_key": "key-should-never-render"
         },
-        "after_sensitive": { "primary_access_key": true }
+        "after_sensitive": { "primary_access_key": true },
+        "after_unknown": {
+          "id": true,
+          "primary_blob_endpoint": true,
+          "primary_connection_string": true
+        }
       }
     },
     {

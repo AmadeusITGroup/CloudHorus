@@ -695,19 +695,24 @@ STRUCTURAL_CLUSTER_PREFIXES = (
 #: Nodes the Diagram draws that describe no resource: the Legend block.
 NON_RESOURCE_NODES = frozenset({"change_legend"})
 
-#: Nodes the private-DNS-zone rendering path draws for the modular sample, which the
-#: Inspector does not collect: the record call sites are the resource-group-level and
-#: the subnet-placed resource node, so a DNS zone node (and a Bastion node) drawn
-#: from the VNet's zone lookup carries no Inspector_Record. Pinned here rather than
-#: filtered silently, because Requirement 3.2 reads as covering every resource the
-#: Graph_Pipeline draws as a node.
-UNCOLLECTED_SAMPLE_NODES = frozenset({"PrivateDNSZones-core-vnet", "privatelink.azurewebsites.net"})
+#: Nodes the private-DNS-zone rendering path draws that the Inspector once left
+#: uncollected. The coverage extension instruments every `add_node_in_subgraph` site,
+#: so both now carry an Inspector_Record and the set is empty: Requirement 3.2 reads
+#: as covering every resource the Graph_Pipeline draws as a node, and it now does.
+#: Kept as an empty pin rather than deleted, so a regression that reintroduces a
+#: drawn-but-undescribed node fails here with the node named.
+UNCOLLECTED_SAMPLE_NODES = frozenset()
 
 #: The Inspector_Key set of the modular sample run, pinned as the regression anchor.
+#: The two private-DNS-zone entries are the coverage extension: the aggregated
+#: `PrivateDNSZones-<vnet>` node, whose source is synthesized from the VNet's zone
+#: list, and the standalone zone node drawn for a zone with no VNet link.
 MODULAR_INDEX_KEYS = {
     "api-web-rg-platform-app": "node",
     "app-plan-rg-platform-app": "node",
     "privateEndpoints-app-rg-platform-app": "node",
+    "PrivateDNSZones-core-vnet": "node",
+    "privatelink.azurewebsites.net": "node",
     "cluster_vnetcore-vnet": "virtualNetwork",
     "cluster_subnetapp": "subnet",
 }
@@ -953,12 +958,18 @@ class TestSamplePlanAnchor:
         assert {key: entry["kind"] for key, entry in index["keys"].items()} == MODULAR_INDEX_KEYS
         assert index["recordCount"] == len(MODULAR_INDEX_KEYS)
 
-        # The gap the anchor also pins: the DNS zone nodes the private-DNS-zone path
-        # draws are activatable elements of the layer with no Inspector_Record behind
-        # them. See `UNCOLLECTED_SAMPLE_NODES`.
+        # What the anchor now pins is the absence of the gap: every node the layer
+        # draws, the Legend aside, carries an Inspector_Record. A node that is drawn
+        # but not described would be activatable with an empty panel, which is the
+        # regression `UNCOLLECTED_SAMPLE_NODES` used to record and now forbids.
         drawn_nodes = enabled.layer_titles().get("node", set())
-        assert UNCOLLECTED_SAMPLE_NODES <= drawn_nodes
-        assert UNCOLLECTED_SAMPLE_NODES.isdisjoint(set(index["keys"]))
+        undescribed = drawn_nodes - set(index["keys"]) - NON_RESOURCE_NODES
+        assert undescribed == UNCOLLECTED_SAMPLE_NODES, f"drawn but not described: {sorted(undescribed)}"
+
+        # Every record the anchor pins carries rows, so no key above buys its
+        # membership with an empty panel (Requirement 3.2).
+        for key in index["keys"]:
+            assert enabled.record(key)["attributes"], f"{key} carries an empty panel"
 
     def test_one_record_carries_the_pinned_attribute_rows(self, sample_anchor_runs):
         """Requirements 5.2, 5.3, 5.4: the rows, their paths and their order, pinned."""

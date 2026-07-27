@@ -179,10 +179,78 @@ NESTED_LAYER_SVG = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 </svg>
 """
 
+#: A layer as `dot -Tsvg` really writes one: every scope container, every
+#: invisible layout node and the Plan_Diff legend carry a <title> of their own,
+#: alongside the three elements that actually hold an Inspector_Record. Only the
+#: latter three appear in the Inspector_Index of `default_fixture()`.
+SCOPED_LAYER_SVG = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="620pt" height="400pt" viewBox="0 0 620 400" xmlns="http://www.w3.org/2000/svg">
+<g id="graph0" class="graph">
+<title>azure</title>
+<g id="clust1" class="cluster">
+<title>cluster_parent</title>
+<polygon id="parent-poly" fill="#ffffff" points="0,0 0,400 620,400 620,0 0,0"/>
+<g id="clust2" class="cluster">
+<title>cluster_tenant0001</title>
+<polygon id="tenant-poly" fill="#fafafa" points="4,4 4,396 616,396 616,4 4,4"/>
+<text text-anchor="middle" x="300" y="18">Tenant 0001</text>
+<g id="clust3" class="cluster">
+<title>cluster_subscription0002</title>
+<polygon id="subscription-poly" fill="#f4f4f4" points="8,8 8,392 612,392 612,8 8,8"/>
+<g id="node9" class="node">
+<title>0002invis</title>
+<ellipse id="invis-ellipse" fill="none" stroke="none" cx="600" cy="380" rx="1" ry="1"/>
+</g>
+<g id="clust4" class="cluster">
+<title>cluster_resource_grouprg-app</title>
+<polygon id="rg-poly" fill="#eeeeee" points="12,12 12,388 608,388 608,12 12,12"/>
+<text text-anchor="middle" x="300" y="30">rg-app</text>
+<g id="clust5" class="cluster">
+<title>cluster_vnetvnet-hub</title>
+<polygon id="vnet-poly" fill="#eaf3fb" points="16,16 16,384 604,384 604,16 16,16"/>
+<g id="clust6" class="cluster">
+<title>cluster_subnetsnet-app</title>
+<polygon id="subnet-poly" fill="#f6fbff" points="24,48 24,340 340,340 340,48 24,48"/>
+<g id="node1" class="node">
+<title>vm-app-rg-app</title>
+<ellipse id="vm-ellipse" fill="none" cx="180" cy="200" rx="60" ry="30"/>
+<text text-anchor="middle" x="180" y="204">vm-app</text>
+</g>
+</g>
+</g>
+</g>
+</g>
+</g>
+<g id="clust7" class="cluster">
+<title>cluster_change_legend</title>
+<polygon id="legend-poly" fill="#ffffff" points="440,300 440,392 612,392 612,300 440,300"/>
+<g id="node8" class="node">
+<title>change_legend</title>
+<polygon id="legend-node-poly" fill="none" points="448,308 448,384 604,384 604,308 448,308"/>
+<text text-anchor="middle" x="526" y="330">Plan changes</text>
+</g>
+</g>
+</g>
+</g>
+</svg>
+"""
+
 VM_KEY = "vm-app-rg-app"
 ST_KEY = "st-data-rg-data"
 VNET_KEY = "cluster_vnetvnet-hub"
 SUBNET_KEY = "cluster_subnetsnet-app"
+
+#: Keys the diagram draws that never carry an Inspector_Record: the scope
+#: containers, the invisible rank node and the Plan_Diff legend.
+UNRECORDED_KEYS = (
+    "cluster_parent",
+    "cluster_tenant0001",
+    "cluster_subscription0002",
+    "cluster_resource_grouprg-app",
+    "0002invis",
+    "cluster_change_legend",
+    "change_legend",
+)
 
 
 def record_payload(
@@ -354,6 +422,44 @@ function childById(key, childId) {
   if (!group) return null;
   const found = group.querySelectorAll('#' + childId);
   return found.length ? found[0] : null;
+}
+"""
+
+
+#: The activation affordances of every group the layer draws, keyed by
+#: Inspector_Key: the keyboard contract, the accessible name, the activatable
+#: marker and the hit rects. This is what the Inspector_Index gate decides.
+TARGET_HELPERS = """
+function dumpTargets() {
+  const root = interactionLayerRoot();
+  const groups = root ? root.querySelectorAll('g.node, g.cluster') : [];
+  const out = {};
+  Array.prototype.forEach.call(groups, function (g) {
+    const title = g.querySelectorAll('title');
+    const key = title.length ? String(title[0].textContent).trim() : '';
+    out[key] = {
+      tabindex: g.getAttribute('tabindex'),
+      role: g.getAttribute('role'),
+      ariaLabel: g.getAttribute('aria-label'),
+      activatable: !!(g.classList && g.classList.contains('ch-activatable')),
+      // Own hit rects only: a descendant count would report the rects of the
+      // nodes an enclosing cluster contains.
+      hitRects: Array.prototype.filter.call(g.children || [], function (child) {
+        return String(child.tagName || '').toLowerCase() === 'rect'
+          && child.classList && child.classList.contains('ch-hit');
+      }).length,
+    };
+  });
+  return out;
+}
+// Sequential keyboard navigation order: the groups carrying tabindex, in
+// document order. A group without tabindex is skipped by the browser.
+function tabOrder() {
+  const root = interactionLayerRoot();
+  const groups = root ? root.querySelectorAll('g.node, g.cluster') : [];
+  return Array.prototype.filter
+    .call(groups, function (g) { return g.getAttribute('tabindex') !== null; })
+    .map(function (g) { return String(g.querySelectorAll('title')[0].textContent).trim(); });
 }
 """
 
@@ -1588,3 +1694,245 @@ return results;
     assert value["keys"] == [VNET_KEY, SUBNET_KEY, VM_KEY]
     # One transparent hit rect per node; a cluster relies on its filled polygon
     assert value["hitRects"] == 1
+
+
+# ─── Only elements with a record are activatable (3.2, 3.9, 8.3, 8.9, 8.11) ───
+
+
+#: Keys of `SCOPED_LAYER_SVG` that the Inspector_Index of `default_fixture()`
+#: holds, in the document order the layer draws them.
+RECORDED_KEYS_IN_ORDER = [VNET_KEY, SUBNET_KEY, VM_KEY]
+
+
+@requires_node
+def test_activation_is_gated_on_the_inspector_index():
+    """Requirements 3.2, 8.3, 8.9: an element carries the activation contract exactly
+    when its Inspector_Key is in the Inspector_Index."""
+    payload = run_app_js(
+        dom_snippet(
+            TARGET_HELPERS
+            + """
+await loadInspector(state.lastGeneratedFile);
+const stage = document.getElementById('viewer-stage');
+const results = { targets: dumpTargets(), order: tabOrder() };
+
+// The recorded node still answers a pointer activation
+stage.dispatchEvent({ type: 'click', target: childById(%%vm%%, 'vm-ellipse') });
+await flush();
+results.nodeClick = dumpPanel();
+
+// ...and so does the recorded container
+closeInspectorPanel();
+stage.dispatchEvent({ type: 'click', target: childById(%%vnet%%, 'vnet-poly') });
+await flush();
+results.vnetClick = dumpPanel();
+
+results.hitRects = interactionLayerRoot().querySelectorAll('rect.ch-hit').length;
+return results;
+""",
+            fixture=default_fixture(layer=SCOPED_LAYER_SVG),
+            vm=VM_KEY,
+            vnet=VNET_KEY,
+        )
+    )
+    value = payload["value"]
+    targets = value["targets"]
+
+    # Every element the layer draws is reported, recorded or not
+    assert set(targets) == set(RECORDED_KEYS_IN_ORDER) | set(UNRECORDED_KEYS)
+
+    for key in RECORDED_KEYS_IN_ORDER:
+        entry = targets[key]
+        assert entry["tabindex"] == "0", key
+        assert entry["role"] == "button", key
+        assert entry["ariaLabel"], key
+        assert entry["activatable"] is True, key
+    # One transparent hit rect for the recorded node, none for the containers
+    assert targets[VM_KEY]["hitRects"] == 1
+    assert targets[VNET_KEY]["hitRects"] == 0
+    assert targets[SUBNET_KEY]["hitRects"] == 0
+    assert value["hitRects"] == 1
+
+    for key in UNRECORDED_KEYS:
+        entry = targets[key]
+        assert entry["tabindex"] is None, key
+        assert entry["role"] is None, key
+        assert entry["ariaLabel"] is None, key
+        assert entry["activatable"] is False, key
+        assert entry["hitRects"] == 0, key
+
+    # Sequential keyboard navigation goes straight from one real resource to the next
+    assert value["order"] == RECORDED_KEYS_IN_ORDER
+
+    assert value["nodeClick"]["inspectorKey"] == VM_KEY
+    assert value["nodeClick"]["name"] == "vm-app"
+    assert value["vnetClick"]["inspectorKey"] == VNET_KEY
+    assert value["vnetClick"]["name"] == "vnet-hub"
+
+
+@requires_node
+def test_scope_containers_and_the_change_legend_are_inert():
+    """Requirement 3.2: a click or a keypress on a scope container, an invisible
+    layout node or the Plan_Diff legend activates nothing at all."""
+    payload = run_app_js(
+        dom_snippet(
+            TARGET_HELPERS
+            + """
+await loadInspector(state.lastGeneratedFile);
+const stage = document.getElementById('viewer-stage');
+const inert = [
+  ['cluster_tenant0001', 'tenant-poly'],
+  ['cluster_subscription0002', 'subscription-poly'],
+  ['cluster_resource_grouprg-app', 'rg-poly'],
+  ['0002invis', 'invis-ellipse'],
+  ['cluster_change_legend', 'legend-poly'],
+  ['change_legend', 'legend-node-poly'],
+];
+const results = { clicks: {}, keys: {}, resolved: {} };
+for (const pair of inert) {
+  const target = childById(pair[0], pair[1]);
+  results.resolved[pair[0]] = !!activatableFrom(target);
+  stage.dispatchEvent({ type: 'click', target: target });
+  await flush();
+  results.clicks[pair[0]] = dumpPanel().panelHidden;
+  stage.dispatchEvent({ type: 'keydown', key: 'Enter', target: target });
+  await flush();
+  results.keys[pair[0]] = dumpPanel().panelHidden;
+}
+// The recorded node inside the very same container tree still opens
+stage.dispatchEvent({ type: 'click', target: childById(%%vm%%, 'vm-ellipse') });
+await flush();
+results.node = dumpPanel();
+return results;
+""",
+            fixture=default_fixture(layer=SCOPED_LAYER_SVG),
+            vm=VM_KEY,
+        )
+    )
+    value = payload["value"]
+
+    for key in value["clicks"]:
+        assert value["resolved"][key] is False, key
+        assert value["clicks"][key] is True, key
+        assert value["keys"][key] is True, key
+
+    # No record read was attempted for any inert element
+    read_keys = [call.get("key") for call in payload["calls"] if call["fn"] == "read_inspector_record"]
+    assert read_keys == [VM_KEY]
+    assert value["node"]["inspectorKey"] == VM_KEY
+
+
+@requires_node
+def test_an_index_arriving_after_the_layer_regates_the_hit_targets():
+    """Requirement 3.2: a layer inlined before the Inspector_Index resolves is not
+    left inert, and the gate is applied the moment the index lands."""
+    payload = run_app_js(
+        js(
+            DUMP_HELPERS
+            + TARGET_HELPERS
+            + """
+state.lastGeneratedFile = %%png%%;
+// The layer resolves, the index does not: the gate has no authority yet
+__installInspectorBridge({ layer: %%layer%%, index: null, records: %%records%% });
+await loadInspector(state.lastGeneratedFile);
+const stage = document.getElementById('viewer-stage');
+const before = { targets: dumpTargets(), order: tabOrder(), hasIndex: !!state.inspectorIndex };
+stage.dispatchEvent({ type: 'click', target: childById('change_legend', 'legend-node-poly') });
+await flush();
+before.legendClick = dumpPanel();
+closeInspectorPanel();
+
+// The index lands late; the pass is re-run over the layer already on screen
+setInspectorIndex(%%index%%);
+const after = { targets: dumpTargets(), order: tabOrder(), hasIndex: !!state.inspectorIndex };
+stage.dispatchEvent({ type: 'click', target: childById('change_legend', 'legend-node-poly') });
+await flush();
+after.legendClick = dumpPanel();
+stage.dispatchEvent({ type: 'click', target: childById(%%vm%%, 'vm-ellipse') });
+await flush();
+after.nodeClick = dumpPanel();
+after.hitRects = interactionLayerRoot().querySelectorAll('rect.ch-hit').length;
+return { before: before, after: after };
+""",
+            png=DIAGRAM_PNG,
+            layer=SCOPED_LAYER_SVG,
+            records=default_fixture()["records"],
+            index=index_payload(DEFAULT_KEYS),
+            vm=VM_KEY,
+        )
+    )
+    before = payload["value"]["before"]
+    after = payload["value"]["after"]
+
+    # Without an index the layer keeps the behaviour of the preceding release:
+    # every drawn element stays activatable rather than silently going inert...
+    assert before["hasIndex"] is False
+    assert all(entry["activatable"] is True for entry in before["targets"].values())
+    assert set(before["order"]) == set(RECORDED_KEYS_IN_ORDER) | set(UNRECORDED_KEYS)
+    # ...and an activation that resolves to a key with no record says so
+    assert before["legendClick"]["panelHidden"] is False
+    assert before["legendClick"]["status"] == NO_RECORD_MESSAGE
+
+    # Once the index arrives the gate is applied to the layer already on screen
+    assert after["hasIndex"] is True
+    assert after["order"] == RECORDED_KEYS_IN_ORDER
+    for key in UNRECORDED_KEYS:
+        assert after["targets"][key]["activatable"] is False, key
+        assert after["targets"][key]["tabindex"] is None, key
+        assert after["targets"][key]["hitRects"] == 0, key
+    assert after["hitRects"] == 1
+    assert after["legendClick"]["panelHidden"] is True
+    assert after["nodeClick"]["inspectorKey"] == VM_KEY
+
+
+@requires_node
+def test_an_indexed_key_whose_record_read_returns_null_keeps_the_fallback_message():
+    """Requirement 8.11: the gate does not remove the defensive fallback - an
+    element in the index whose record read answers null still gets the message."""
+    payload = run_app_js(
+        dom_snippet(
+            TARGET_HELPERS
+            + """
+await loadInspector(state.lastGeneratedFile);
+const stage = document.getElementById('viewer-stage');
+const targets = dumpTargets();
+stage.dispatchEvent({ type: 'click', target: childById(%%vm%%, 'vm-ellipse') });
+await flush();
+return { targets: targets, panel: dumpPanel() };
+""",
+            fixture=default_fixture(layer=SCOPED_LAYER_SVG, records={}),
+            vm=VM_KEY,
+        )
+    )
+    value = payload["value"]
+
+    # The element is activatable: its key is in the index
+    assert value["targets"][VM_KEY]["activatable"] is True
+    assert value["targets"][VM_KEY]["tabindex"] == "0"
+    # The record read answered null, so the documented message stands
+    assert value["panel"]["panelHidden"] is False
+    assert value["panel"]["status"] == NO_RECORD_MESSAGE
+    assert value["panel"]["rows"] == []
+
+
+def test_the_pointer_cue_is_scoped_to_activatable_elements():
+    """Requirement 8.7 and discoverability: the pointer cursor and the hover
+    affordance apply to activatable elements only, and the selection indicator
+    keeps its own stroke."""
+    css = read_text(STYLE_CSS)
+
+    # The base hit-rect rule no longer claims the pointer for every node
+    base_start = css.index(".viewer-stage rect.ch-hit {")
+    base_rule = css[base_start : css.index("}", base_start)]
+    assert "cursor" not in base_rule
+
+    cue_start = css.index(".viewer-stage .ch-activatable,")
+    cue_rule = css[cue_start : css.index("}", cue_start)]
+    assert "cursor: pointer" in cue_rule
+
+    # A hover affordance exists and stands down on the selected element
+    hover_start = css.index(".viewer-stage .ch-activatable:not(.ch-selected):hover rect.ch-hit")
+    assert hover_start > cue_start
+    selection_start = css.index(".viewer-stage .ch-selected rect.ch-hit")
+    selection_rule = css[selection_start : css.index("}", selection_start)]
+    assert "stroke" in selection_rule

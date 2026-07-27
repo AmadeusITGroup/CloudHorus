@@ -7,7 +7,7 @@ import re
 import subprocess
 import time
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import graphviz
 from graphviz import Digraph
@@ -43,10 +43,16 @@ from .azure_cli import (
 )
 from .bicep_builder import build_bicep_template
 from .inspector import (
+    AFTER_KEY,
+    AFTER_UNKNOWN_KEY,
+    BEFORE_KEY,
+    INSPECTOR_VALUES_KEY,
     INTERACTION_LAYER_SUFFIX,
+    SOURCE_IDENTITY_KEYS,
     SUBNET_KIND,
     VNET_KIND,
     InspectorCollector,
+    InspectorPayload,
     NullInspectorCollector,
     write_inspector_payload,
     write_svg_with_embedded_icons,
@@ -191,6 +197,270 @@ def resolve_subnet_inspector_source(
         if source is not None:
             return source
     return subnet_entry
+
+
+#: Renderer resource type of a private DNS zone, drawn as a node either per zone
+#: or aggregated per VNet depending on `privateDnsZonesOptimization`.
+DNS_ZONE_RENDERER_TYPE: str = "Microsoft.Network/privateDnsZones"
+
+#: Renderer resource type of a Bastion host, drawn as one node inside its VNet.
+BASTION_RENDERER_TYPE: str = "Microsoft.Network/bastionHosts"
+
+#: Node_Key prefix of the aggregated private-DNS-zone node.
+AGGREGATED_DNS_NODE_PREFIX: str = "PrivateDNSZones-"
+
+#: Attribute subtree key under which an aggregated element lists the elements it
+#: stands for: the zone list of the aggregated DNS node, and one entry per merged
+#: private endpoint of a `peOptimization` node.
+AGGREGATED_ZONES_KEY: str = "linkedZones"
+
+#: Attribute key holding the number of aggregated elements.
+AGGREGATED_COUNT_KEY: str = "zoneCount"
+
+#: Attribute subtree key holding the configuration of each aggregated zone that
+#: also resolves to a Renderer_Template resource entry.
+AGGREGATED_ZONE_CONFIG_KEY: str = "zoneConfigurations"
+
+#: Attribute subtree key under which a `peOptimization` node lists the real
+#: private endpoints it merges, keyed by their real resource name.
+MERGED_ENDPOINTS_KEY: str = "mergedEndpoints"
+
+#: Attribute key holding the number of merged private endpoints.
+MERGED_ENDPOINT_COUNT_KEY: str = "mergedEndpointCount"
+
+
+def inspector_source_phases(resource: Any) -> Tuple[Any, Any, Any]:
+    """Return the `(before, after, unknown)` phases of one resource entry.
+
+    A Renderer_Template entry that carries the `inspectorValues` triple the
+    Terraform builder attached is used as is; every other entry is described by
+    its own configuration on both sides, which is the Legacy_Mode shape
+    (Requirements 6.9, 10.1, 10.4). This mirrors what the collector does per
+    element, and exists here because an aggregated element has to compose the
+    phases of the several resources it stands for before the collector sees them.
+    """
+    if not isinstance(resource, dict):
+        return resource, resource, None
+
+    values = resource.get(INSPECTOR_VALUES_KEY)
+    if isinstance(values, dict):
+        return values.get(BEFORE_KEY), values.get(AFTER_KEY), values.get(AFTER_UNKNOWN_KEY)
+
+    config = inspector_source_config(resource)
+    return config, config, None
+
+
+def inspector_source_config(resource: Any) -> Any:
+    """Return the configuration one resource entry holds, identity keys excluded.
+
+    The exclusion set is the collector's own `SOURCE_IDENTITY_KEYS`, so an element
+    described through this path yields the Attribute_Paths it would yield if the
+    collector had been handed the entry directly.
+    """
+    if not isinstance(resource, dict):
+        return resource
+
+    config: Dict[str, Any] = {}
+    properties = resource.get("properties")
+    if isinstance(properties, dict) and properties:
+        config["properties"] = properties
+    for key, value in resource.items():
+        if key in SOURCE_IDENTITY_KEYS or value is None:
+            continue
+        config[key] = value
+    return config
+
+
+def build_aggregated_dns_zone_source(
+    vnet_name: str,
+    dns_zone_list: Any,
+    inspector_sources: Dict[InspectorSourceKey, Any],
+) -> Dict[str, Any]:
+    """Synthesize the Inspector source of the aggregated private-DNS-zone node.
+
+    With `privateDnsZonesOptimization` on, the N zones linked to one VNet collapse
+    onto the single node `PrivateDNSZones-<vnet>`, so no resource entry backs that
+    element. The useful configuration is the aggregation itself: the zone list,
+    the zone count, and — for every zone that also resolves in the Inspector
+    source index — that zone's own configuration under its name, so the panel
+    still shows what each aggregated zone holds (Requirements 4.1, 4.4).
+
+    The synthesized tree is a plain dict, so the collector describes it on both
+    sides and every row reads `unchanged`, and the Value_Bounds apply to it
+    exactly as they apply to a real resource (Requirement 12.2).
+    """
+    zones = [zone for zone in (dns_zone_list or []) if isinstance(zone, str)]
+    properties: Dict[str, Any] = {
+        AGGREGATED_ZONES_KEY: zones,
+        AGGREGATED_COUNT_KEY: len(zones),
+    }
+
+    configurations: Dict[str, Any] = {}
+    for zone in zones:
+        resource = inspector_sources.get((zone, DNS_ZONE_RENDERER_TYPE))
+        if resource is None:
+            continue
+        configurations[zone] = inspector_source_config(resource)
+    if configurations:
+        properties[AGGREGATED_ZONE_CONFIG_KEY] = configurations
+
+    return {
+        "name": f"{AGGREGATED_DNS_NODE_PREFIX}{vnet_name}",
+        "type": DNS_ZONE_RENDERER_TYPE,
+        "properties": properties,
+    }
+
+
+def record_optimized_inspector_source(
+    optimized_sources: Dict[InspectorSourceKey, List[Any]],
+    optimized_name: str,
+    resource_type: str,
+    resource: Any,
+) -> None:
+    """Remember the real resource behind an optimization-rewritten node name.
+
+    `peOptimization` rewrites a private endpoint's `resource_name` to
+    `privateEndpoints-<subnet>`, and several endpoints of the same subnet collapse
+    onto that one name. The Inspector source index is keyed by the *real* resource
+    name, so the rewritten name resolves through this side map instead — and
+    because it collects a list, the merged endpoints are all still reachable
+    rather than only the first one.
+    """
+    if not isinstance(optimized_name, str) or not optimized_name:
+        return
+    optimized_sources.setdefault((optimized_name, resource_type), []).append(resource)
+
+
+def record_node_once(
+    inspector: Any,
+    drawn_keys: set,
+    node_key: str,
+    source: Any,
+    resource_group: str,
+) -> None:
+    """Record one drawn node, ignoring the draw calls that repeat its Node_Key.
+
+    A few nodes are drawn once per subnet that references them while being keyed
+    more coarsely than a subnet: an NSG shared by two subnets is drawn in both and
+    keyed `<nsg>-<resource group>` in both, so the second draw is the same element
+    a second time rather than a second element. Recording per drawn element instead
+    of per draw call is what keeps the collision count of Requirement 4.5 a report
+    about *two resources answering to one Inspector_Key* rather than a count of
+    repeated draws, which is the same discipline the no-VNet-linked DNS zone nodes
+    follow.
+
+    `drawn_keys` is owned by the caller and scoped to one resource group, so a
+    Node_Key that two resource groups both produce is still the genuine collision
+    Requirement 4.5 asks to be told about.
+    """
+    if node_key in drawn_keys:
+        return
+    drawn_keys.add(node_key)
+    inspector.record_node(node_key, source, resource_group)
+
+
+def build_merged_inspector_source(
+    optimized_name: str,
+    resource_type: str,
+    entries: Sequence[Any],
+) -> Dict[str, Any]:
+    """Compose the Inspector source of one node that merges several resources.
+
+    Each merged resource keeps its own phases under
+    `mergedEndpoints.<real resource name>`, so the panel shows every endpoint the
+    node stands for and each one keeps its own Attribute_States rather than the
+    first endpoint winning and the rest being dropped (Requirements 4.1, 4.4). A
+    phase a resource does not have contributes no subtree, so an endpoint the plan
+    deletes reads `removed` and one it creates reads `added`.
+
+    The composed tree goes through the ordinary Value_Bounds: nesting past the
+    Depth_Bound collapses to the Truncation_Marker and rows past the Row_Bound are
+    omitted and reported, exactly as for a single resource (Requirement 12.2-12.5).
+    """
+    before: Dict[str, Any] = {}
+    after: Dict[str, Any] = {}
+    unknown: Dict[str, Any] = {}
+    categories = set()
+
+    for index, entry in enumerate(entries):
+        name = entry.get("name") if isinstance(entry, dict) else None
+        key = name if isinstance(name, str) and name else f"{resource_type}#{index}"
+        entry_before, entry_after, entry_unknown = inspector_source_phases(entry)
+        if entry_before is not None:
+            before[key] = entry_before
+        if entry_after is not None:
+            after[key] = entry_after
+        if entry_unknown is not None:
+            unknown[key] = entry_unknown
+        if isinstance(entry, dict):
+            category = entry.get("changeCategory")
+            if isinstance(category, str) and category:
+                categories.add(category)
+
+    count = len(entries)
+    source: Dict[str, Any] = {
+        "name": optimized_name,
+        "type": resource_type,
+        INSPECTOR_VALUES_KEY: {
+            BEFORE_KEY: {MERGED_ENDPOINTS_KEY: before, MERGED_ENDPOINT_COUNT_KEY: count},
+            AFTER_KEY: {MERGED_ENDPOINTS_KEY: after, MERGED_ENDPOINT_COUNT_KEY: count},
+            AFTER_UNKNOWN_KEY: {MERGED_ENDPOINTS_KEY: unknown} if unknown else None,
+        },
+    }
+    # A single Change_Category is only meaningful when every merged resource agrees
+    # on it; a mixed node carries none rather than the first one it happened to see.
+    if len(categories) == 1:
+        source["changeCategory"] = categories.pop()
+    return source
+
+
+def resolve_node_inspector_source(
+    inspector_sources: Dict[InspectorSourceKey, Any],
+    optimized_sources: Dict[InspectorSourceKey, List[Any]],
+    resource_name: str,
+    resource_type: str,
+) -> Any:
+    """Return the Inspector source of one drawn node, by the name the node carries.
+
+    The real resource entry is preferred. A name an optimization rewrote resolves
+    through the side map instead: one endpoint gives that endpoint's own entry, and
+    several endpoints merged onto one node give the composite source, so a
+    `peOptimization` node is described by real configuration rather than by the
+    degenerate record an absent source produces (Requirements 3.2, 4.4).
+    """
+    source = inspector_sources.get((resource_name, resource_type))
+    if source is not None:
+        return source
+
+    entries = optimized_sources.get((resource_name, resource_type))
+    if not entries:
+        return None
+    if len(entries) == 1:
+        return entries[0]
+    return build_merged_inspector_source(resource_name, resource_type, entries)
+
+
+def prune_stale_inspector_records(
+    payload: InspectorPayload,
+    stale_subnet_names: Any,
+) -> InspectorPayload:
+    """Drop the Inspector_Records of subnet clusters the DOT post-pass removed.
+
+    `_remove_stale_subnet_subgraphs` edits `dot.source` after the render pass has
+    already collected those clusters, so their records would describe elements the
+    Diagram no longer draws and would inflate the record count the Inspector_Index
+    reports (Requirements 4.1, 4.3).
+    """
+    if not stale_subnet_names:
+        return payload
+
+    stale_keys = {f"cluster_subnet{name}" for name in stale_subnet_names}
+    kept = [record for record in payload.records if record.key not in stale_keys]
+    dropped = len(payload.records) - len(kept)
+    if dropped:
+        logger.debug(f"Dropped {dropped} Inspector record(s) of removed subnet subgraph(s)")
+    payload.records = kept
+    return payload
 
 
 def apply_cluster_change_style(
@@ -1932,7 +2202,17 @@ def _generate_resource_graph_inner(
                 logger.info(
                     f"Building Terraform template {i+1}/{len(terraform_root_dirs)} from source: {terraform_root_dir}"
                 )
-                template_file = terraform_builder.build_terraform_source(terraform_root_dir, aligned_var_files)
+                # Same discipline as the terraform-json branch: the trailing
+                # `collect_inspector_values` keyword only reaches the builder when
+                # the Operator enabled Inspector_Mode, so a run without
+                # `--interactiveInspector` calls the pre-feature signature
+                # (Requirements 1.5, 10.1).
+                source_builder_kwargs: Dict[str, Any] = (
+                    {"collect_inspector_values": True} if interactive_inspector else {}
+                )
+                template_file = terraform_builder.build_terraform_source(
+                    terraform_root_dir, aligned_var_files, **source_builder_kwargs
+                )
                 if not template_file:
                     logger.error(f"Failed to build Terraform source template {i+1}: {terraform_root_dir}")
                     return
@@ -2287,6 +2567,14 @@ def _generate_resource_graph_inner(
                                                 if interactive_inspector
                                                 else {}
                                             )
+                                            # Side map for the node names an optimization rewrote,
+                                            # which the index above cannot hold because it is keyed
+                                            # by the real resource name. Populated only in
+                                            # Inspector_Mode, so the disabled path pays for an empty
+                                            # dict literal here too.
+                                            inspector_optimized_sources: Dict[
+                                                InspectorSourceKey, List[Any]
+                                            ] = {}
 
                                             # ── Pre-fetch RG-level data ONCE (avoid redundant API calls per resource) ──
                                             _pre_t0 = time.time()
@@ -2307,6 +2595,21 @@ def _generate_resource_graph_inner(
                                             _cached_no_vnet_dns_zones = get_private_dns_zones_without_vnets(
                                                 resourceGroup, subscription_id, use_local_template
                                             )
+                                            # The no-VNet-linked DNS zone nodes are drawn from inside the
+                                            # per-resource loop — once per resource, onto the same node
+                                            # names — so the zone names are collected here and recorded
+                                            # once each after the loop. Recording them at the draw site
+                                            # would call the collector once per resource per zone and log
+                                            # a Duplicate Inspector_Key warning for every repeat, which is
+                                            # noise rather than the genuine key collision Requirement 4.5
+                                            # describes.
+                                            drawn_no_vnet_dns_zones: List[str] = []
+                                            # The Node_Keys of the subnet-dependency nodes already
+                                            # recorded in this resource group. A route table and an
+                                            # NSG are drawn once per subnet that references them, so
+                                            # this is what keeps one record per drawn element there
+                                            # too (Requirement 4.5).
+                                            drawn_subnet_dependency_nodes: set = set()
                                             # PE subnet cache is now centralized in az_sdk._pe_subnet_cache
                                             # (shared across resource_processor and graph_generator).
                                             # The local _pe_subnet_cache below acts as a fast-path for the
@@ -2392,6 +2695,23 @@ def _generate_resource_graph_inner(
                                                     else:
                                                         res_pbar.update(1)
                                                         continue
+                                                    # An optimization may have rewritten the name the
+                                                    # node will be keyed by — `privateEndpoints-<subnet>`
+                                                    # under `peOptimization`, the bare subnet name for a
+                                                    # compound-named subnet. The Inspector source index
+                                                    # is keyed by the real resource name, so the rewritten
+                                                    # name is remembered here and resolved through the
+                                                    # side map at the creation site. Several resources
+                                                    # rewritten onto the same name all land in the list,
+                                                    # which is what lets a merged node describe every one
+                                                    # of them (Requirements 3.2, 4.4).
+                                                    if interactive_inspector and resource_name != resource.get("name"):
+                                                        record_optimized_inspector_source(
+                                                            inspector_optimized_sources,
+                                                            resource_name,
+                                                            resource_type,
+                                                            resource,
+                                                        )
                                                     # Initialize dependencies list for this resource
                                                     resource_key = (resource_name, resource_type, resourceGroup)
                                                     if "dependsOn" in resource:
@@ -2593,6 +2913,12 @@ def _generate_resource_graph_inner(
                                                                     zone_icon_path,
                                                                     resource_type="Microsoft.Network/privateDnsZones",
                                                                 )
+                                                                # Drawn: remembered for the single recording
+                                                                # pass after the loop, which is what keeps
+                                                                # one record per drawn zone node rather than
+                                                                # one call per resource per zone.
+                                                                if zone not in drawn_no_vnet_dns_zones:
+                                                                    drawn_no_vnet_dns_zones.append(zone)
                                                         if resource["type"] == "Microsoft.Network/virtualNetworks":
                                                             is_vnet_in_subscription = True
                                                             # get vnet CIDR
@@ -2672,6 +2998,21 @@ def _generate_resource_graph_inner(
                                                                             pdz_icon_path,
                                                                             resource_type="Microsoft.Network/privateDnsZones",
                                                                         )
+                                                                        # N zones on one node: no single
+                                                                        # resource backs this element, so the
+                                                                        # aggregation itself is the
+                                                                        # configuration the panel shows
+                                                                        # (Requirements 4.1, 4.4).
+                                                                        inspector.record_node(
+                                                                            AGGREGATED_DNS_NODE_PREFIX
+                                                                            + resource_name,
+                                                                            build_aggregated_dns_zone_source(
+                                                                                resource_name,
+                                                                                dns_zone_list,
+                                                                                inspector_sources,
+                                                                            ),
+                                                                            resourceGroup,
+                                                                        )
                                                                     else:
                                                                         # plot explicit DNS zones
                                                                         for zone in dns_zone_list:
@@ -2684,6 +3025,16 @@ def _generate_resource_graph_inner(
                                                                                 zone,
                                                                                 zone_icon_path,
                                                                                 resource_type="Microsoft.Network/privateDnsZones",
+                                                                            )
+                                                                            # One node per zone, keyed by the
+                                                                            # bare zone name the Diagram gave
+                                                                            # it (Requirements 3.2, 3.4).
+                                                                            inspector.record_node(
+                                                                                zone,
+                                                                                inspector_sources.get(
+                                                                                    (zone, DNS_ZONE_RENDERER_TYPE)
+                                                                                ),
+                                                                                resourceGroup,
                                                                             )
                                                                 # Add Bastion Host check
 
@@ -2710,6 +3061,19 @@ def _generate_resource_graph_inner(
                                                                         bastion_name,
                                                                         bastion_icon_path,
                                                                         resource_type="Microsoft.Network/bastionHosts",
+                                                                    )
+                                                                    # The Bastion node is keyed by the bare
+                                                                    # host name the Diagram gave it
+                                                                    # (Requirements 3.2, 3.4).
+                                                                    inspector.record_node(
+                                                                        bastion_name,
+                                                                        inspector_sources.get(
+                                                                            (
+                                                                                bastion_name,
+                                                                                BASTION_RENDERER_TYPE,
+                                                                            )
+                                                                        ),
+                                                                        resourceGroup,
                                                                     )
                                                                 # Count subnets for get central Resource group
                                                                 subnet_count = len(
@@ -2891,13 +3255,19 @@ def _generate_resource_graph_inner(
                                                                                         # `<resource_name>-<resource_group>`
                                                                                         # the Graph_Pipeline gave it
                                                                                         # (Requirements 3.2, 3.4).
+                                                                                        # `peOptimization` rewrote
+                                                                                        # the name this node is
+                                                                                        # keyed by, so the source
+                                                                                        # is resolved through the
+                                                                                        # rewrite side map when the
+                                                                                        # real-name lookup misses.
                                                                                         inspector.record_node(
                                                                                             node_id,
-                                                                                            inspector_sources.get(
-                                                                                                (
-                                                                                                    subnet_resource_name,
-                                                                                                    resource_type,
-                                                                                                )
+                                                                                            resolve_node_inspector_source(
+                                                                                                inspector_sources,
+                                                                                                inspector_optimized_sources,
+                                                                                                subnet_resource_name,
+                                                                                                resource_type,
                                                                                             ),
                                                                                             resourceGroup,
                                                                                         )
@@ -2963,6 +3333,26 @@ def _generate_resource_graph_inner(
                                                                                                     subnet_resources_icon_path,
                                                                                                     resource_type=dep_type,
                                                                                                 )
+                                                                                                # One route table is
+                                                                                                # drawn once per subnet
+                                                                                                # that uses it, so every
+                                                                                                # drawn key is recorded
+                                                                                                # from the same source
+                                                                                                # (Requirements 3.2, 4.1).
+                                                                                                record_node_once(
+                                                                                                    inspector,
+                                                                                                    drawn_subnet_dependency_nodes,
+                                                                                                    dep
+                                                                                                    + "-"
+                                                                                                    + subnet_name,
+                                                                                                    resolve_node_inspector_source(
+                                                                                                        inspector_sources,
+                                                                                                        inspector_optimized_sources,
+                                                                                                        dep,
+                                                                                                        dep_type,
+                                                                                                    ),
+                                                                                                    resourceGroup,
+                                                                                                )
                                                                                             else:
                                                                                                 add_node_in_subgraph(
                                                                                                     subnet_subgraph,
@@ -2972,6 +3362,33 @@ def _generate_resource_graph_inner(
                                                                                                     dep,
                                                                                                     subnet_resources_icon_path,
                                                                                                     resource_type=dep_type,
+                                                                                                )
+                                                                                                # The only place an NSG
+                                                                                                # is ever drawn: the
+                                                                                                # resource-group pass
+                                                                                                # skips it, so this is
+                                                                                                # what brings it into
+                                                                                                # the Inspector
+                                                                                                # (Requirements 3.2, 4.1).
+                                                                                                # Keyed by the resource
+                                                                                                # group while drawn per
+                                                                                                # subnet, so the repeat
+                                                                                                # draws are ignored
+                                                                                                # rather than counted as
+                                                                                                # collisions.
+                                                                                                record_node_once(
+                                                                                                    inspector,
+                                                                                                    drawn_subnet_dependency_nodes,
+                                                                                                    dep
+                                                                                                    + "-"
+                                                                                                    + resourceGroup,
+                                                                                                    resolve_node_inspector_source(
+                                                                                                        inspector_sources,
+                                                                                                        inspector_optimized_sources,
+                                                                                                        dep,
+                                                                                                        dep_type,
+                                                                                                    ),
+                                                                                                    resourceGroup,
                                                                                                 )
                                                                         # plot empty subnet
                                                                         elif (
@@ -3086,6 +3503,18 @@ def _generate_resource_graph_inner(
                                                             f"[DIAG] res#{_res_idx} END dt={_iter_elapsed:.3f}s"
                                                         )
                                                     res_pbar.update(1)  # Single update per resource iteration
+                                                # One record per drawn no-VNet-linked DNS zone node, keyed by
+                                                # the bare zone name the Diagram gave it (Requirements 3.2,
+                                                # 3.4, 4.1). Outside the per-resource loop: the node itself is
+                                                # emitted once per resource by the pre-existing draw call, and
+                                                # recording per drawn element rather than per draw call is what
+                                                # keeps the Inspector_Key collision count meaningful.
+                                                for zone in drawn_no_vnet_dns_zones:
+                                                    inspector.record_node(
+                                                        zone,
+                                                        inspector_sources.get((zone, DNS_ZONE_RENDERER_TYPE)),
+                                                        resourceGroup,
+                                                    )
                                                 _total_res_elapsed = time.time() - _res_loop_start
                                                 logger.debug(
                                                     f"[DIAG] Resource loop for {resourceGroup} completed: {len(resources)} resources in {_total_res_elapsed:.1f}s"
@@ -3474,7 +3903,10 @@ def _generate_resource_graph_inner(
     # (Requirements 1.9, 1.11).
     if interactive_inspector:
         try:
-            write_inspector_payload(inspector.build_payload(), output_filename)
+            write_inspector_payload(
+                prune_stale_inspector_records(inspector.build_payload(), stale_subnet_names),
+                output_filename,
+            )
         except Exception as error:  # noqa: BLE001 - the payload is optional, the PNG is not
             logger.warning(f"Could not write the Inspector payload: {type(error).__name__}: {error}")
 

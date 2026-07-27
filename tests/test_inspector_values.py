@@ -38,6 +38,10 @@ class _RecordCollector(logging.Handler):
     def warnings(self) -> List[str]:
         return [message for levelno, message in self.records if levelno == logging.WARNING]
 
+    def messages(self, level: int) -> List[str]:
+        """The messages emitted at exactly one level."""
+        return [message for levelno, message in self.records if levelno == level]
+
 
 @contextmanager
 def captured_logs():
@@ -249,8 +253,14 @@ def test_missing_before_object_empties_the_before_snapshot_for_delete() -> None:
     assert any(ADDRESS in message for message in handler.warnings())
 
 
-def test_no_change_object_uses_the_attribute_map_on_both_sides_and_logs_the_address() -> None:
-    """A resource with no change entry: one tree both sides, address logged (6.9)."""
+def test_no_change_object_uses_the_attribute_map_on_both_sides_and_logs_at_debug() -> None:
+    """A resource with no change entry: one tree both sides, no warning (6.9).
+
+    An input with no plan data carries no change entry for *any* resource, so this
+    branch is the normal case rather than an anomaly: the address is recorded at
+    debug level and the volume is reported once per document by
+    `_attach_inspector_values`.
+    """
     plan = _plan()
     resource = _resource({"name": "sql-primary", "version": "12.0"})
 
@@ -258,7 +268,8 @@ def test_no_change_object_uses_the_attribute_map_on_both_sides_and_logs_the_addr
         values = _builder()._inspector_values_for(plan, resource, "unchanged")
 
     assert values["before"] == values["after"] == {"name": "sql-primary", "version": "12.0"}
-    assert any(ADDRESS in message for message in handler.warnings())
+    assert handler.warnings() == []
+    assert any(ADDRESS in message for message in handler.messages(logging.DEBUG))
 
 
 def test_an_unrecognized_category_resolves_like_unchanged() -> None:
@@ -596,9 +607,17 @@ class TestEnabledPath:
             "after": {"version": "12.0", "administrator_login_password": SENSITIVE},
         }
 
-    def test_the_enabled_template_differs_from_the_disabled_one_only_by_the_new_key(
+    def test_the_enabled_template_differs_from_the_disabled_one_only_by_the_new_keys(
         self, tmp_path
     ) -> None:
+        """Inspector_Mode adds `inspectorValues` and `address`, and nothing else.
+
+        `address` joined `inspectorValues` with the coverage extension: the panel
+        header shows the Terraform address (Requirement 5.5), so it has to reach the
+        Renderer_Template. Like `inspectorValues` it is emitted only when the toggle
+        is on, which is what keeps the disabled Renderer_Template byte-identical
+        (Requirements 1.5, 10.1).
+        """
         plan = _write_plan(tmp_path)
         disabled_output = str(tmp_path / "disabled.json")
         enabled_output = str(tmp_path / "enabled.json")
@@ -611,8 +630,14 @@ class TestEnabledPath:
 
         for resource in enabled["resources"]:
             assert "inspectorValues" in resource
+            assert resource.pop("address"), "the enabled path must publish the address"
             resource.pop("inspectorValues")
         assert enabled == disabled
+
+        # The disabled template carries neither key, so the addition is opt-in.
+        for resource in disabled["resources"]:
+            assert "inspectorValues" not in resource
+            assert "address" not in resource
 
 
 class TestWrapperPositionalSignature:
@@ -957,11 +982,15 @@ def test_property_19_before_and_after_resolution_follows_the_category_table(entr
     assert values["before"] == expected_before
     assert values["after"] == expected_after
 
-    # Each fallback branch logs the resource address, and only the address.
-    if missing or (change is None and category not in ("create", "delete", "update", "replace")):
+    # A phase the Change_Category requires but the entry omits is the anomaly: it warns,
+    # naming the address and nothing else. A resource with no change entry at all is the
+    # normal plan-less case: it is recorded at debug and never warns.
+    if missing:
         assert any(entry["address"] in message for message in handler.warnings())
     else:
         assert handler.warnings() == []
+    if change is None and category not in ("create", "delete", "update", "replace"):
+        assert any(entry["address"] in message for message in handler.messages(logging.DEBUG))
 
     # The unknown mask travels untouched, and only when the plan carries one.
     unknown = None if change is None else change.get("after_unknown")

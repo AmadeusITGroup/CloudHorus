@@ -3117,21 +3117,87 @@ function elementDisplayName(el) {
   return label || inspectorKeyFromElement(el);
 }
 
-// One transparent hit rect per node group plus the keyboard and assistive
-// technology contract on every activatable element (Requirements 8.3, 8.9).
-// A cluster needs no rect: its <polygon> is already filled and painted before
-// the nodes it contains, so a node always wins the hit test (Requirements 9.2-9.4, 9.8).
+// The `keys` map of the Inspector_Index is the authority on what carries an
+// Inspector_Record. Graphviz writes a <title> for every group it draws, which
+// includes the scope containers (cluster_parent, cluster_tenant…,
+// cluster_subscription…, cluster_resource_group…), the invisible rank nodes and
+// the Plan_Diff legend — none of which is a resource. Gating on the index rather
+// than on a name pattern means a newly recorded element becomes activatable with
+// no front-end change at all.
+function inspectorIndexKeys() {
+  const index = state.inspectorIndex;
+  const keys = index && typeof index === 'object' ? index.keys : null;
+  return keys && typeof keys === 'object' ? keys : null;
+}
+
+// True when the element has a record to show. With no index resolved yet the
+// answer is "assume yes": that is the behaviour of the release preceding this
+// change, and it keeps the layer usable when the payload is missing or
+// unreadable, where the delegated listener still falls back to the documented
+// message (Requirements 8.11, 13.1).
+function isInspectableKey(key) {
+  const keys = inspectorIndexKeys();
+  if (!keys) return true;
+  return !!key && Object.prototype.hasOwnProperty.call(keys, key);
+}
+
+// The hit rects a group owns itself. A descendant lookup would reach the rects
+// of the nodes an enclosing cluster contains, which is not this group's business.
+function ownHitRects(group) {
+  return elementChildren(group).filter(
+    child =>
+      String(child.tagName || '').toLowerCase() === 'rect' &&
+      child.classList &&
+      child.classList.contains('ch-hit')
+  );
+}
+
+// Take every activation affordance off an element that has no Inspector_Record:
+// no tabindex (so sequential keyboard navigation skips straight from one real
+// resource to the next), no role, no accessible name, no hit rect.
+function clearHitTarget(group) {
+  group.removeAttribute('tabindex');
+  group.removeAttribute('role');
+  group.removeAttribute('aria-label');
+  if (group.classList) {
+    group.classList.remove('ch-activatable');
+    group.classList.remove('ch-selected');
+  }
+  for (const rect of ownHitRects(group)) {
+    if (typeof rect.remove === 'function') rect.remove();
+    else group.removeChild(rect);
+  }
+}
+
+// One transparent hit rect per activatable node group plus the keyboard and
+// assistive technology contract on every activatable element (Requirements 8.3,
+// 8.9). A cluster needs no rect: its <polygon> is already filled and painted
+// before the nodes it contains, so a node always wins the hit test
+// (Requirements 9.2-9.4, 9.8). An element whose Inspector_Key is absent from the
+// Inspector_Index gets none of it. The pass is idempotent, so it can be re-run
+// when the index lands after the layer.
 function attachHitTargets(root) {
   if (!root || typeof root.querySelectorAll !== 'function') return 0;
   const groups = root.querySelectorAll('g.node, g.cluster');
   let rects = 0;
   Array.prototype.forEach.call(groups, group => {
+    if (!isInspectableKey(inspectorKeyFromElement(group))) {
+      clearHitTarget(group);
+      return;
+    }
+
     group.setAttribute('tabindex', '0');
     group.setAttribute('role', 'button');
+    if (group.classList) group.classList.add('ch-activatable');
     const name = elementDisplayName(group);
     if (name) group.setAttribute('aria-label', name);
 
     if (!group.classList || !group.classList.contains('node')) return;
+
+    if (ownHitRects(group).length) {
+      rects += 1;
+      return;
+    }
 
     const rect = document.createElementNS(SVG_NS, 'rect');
     rect.setAttribute('class', 'ch-hit');
@@ -3154,6 +3220,24 @@ function attachHitTargets(root) {
     rects += 1;
   });
   return rects;
+}
+
+// Re-run the hit-target pass over the layer that is already on the stage. Called
+// when the Inspector_Index resolves after the layer was inlined, so the gate is
+// applied exactly once the authority for it exists rather than leaving the layer
+// inert or leaving every container activatable.
+function refreshHitTargets() {
+  const root = interactionLayerRoot();
+  if (!root) return 0;
+  return attachHitTargets(root);
+}
+
+// Single writer for state.inspectorIndex, so a late index always reaches the
+// layer that is on screen.
+function setInspectorIndex(index) {
+  state.inspectorIndex = index || null;
+  refreshHitTargets();
+  return state.inspectorIndex;
 }
 
 // The PNG is the only layer: hide the switch and leave today's viewer behaviour
@@ -3278,11 +3362,13 @@ async function loadInspector(pngPath) {
     fallBackToImageLayer();
     return null;
   }
+  // The index is awaited before the layer is inlined, so the very first
+  // hit-target pass already knows which keys carry an Inspector_Record.
   if (a.read_inspector_index) {
     try {
-      state.inspectorIndex = await a.read_inspector_index(pngPath);
+      setInspectorIndex(await a.read_inspector_index(pngPath));
     } catch (e) {
-      state.inspectorIndex = null;
+      setInspectorIndex(null);
     }
   }
   await showInteractionLayer(pngPath);
@@ -3307,9 +3393,13 @@ function inspectorKeyFromElement(el) {
   return title ? String(title.textContent || '').trim() : '';
 }
 
+// Only an element the hit-target pass marked activatable answers an activation,
+// so a click on a scope container or on the Plan_Diff legend reaches nothing.
+// The innermost marked ancestor still wins, which is what keeps a node inside a
+// subnet inside a virtual network resolving to the node (Requirements 9.4, 9.8).
 function activatableFrom(target) {
   if (!target || typeof target.closest !== 'function') return null;
-  return target.closest('g.node, g.cluster');
+  return target.closest('g.node.ch-activatable, g.cluster.ch-activatable');
 }
 
 // A stroke change on the activated element, so the selection is not signalled by

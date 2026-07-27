@@ -47,7 +47,14 @@ def add_node_in_subgraph(subgraph, node_id, label, image_path, resource_type, gr
         "labelloc": "b",  # Label at bottom
         "imagescale": "false",
         "width": "1.8",  # Slightly reduced width for tighter layout
-        "height": "1.8",  # Slightly reduced height
+        # The icon is drawn at its natural size (`imagescale=false`) at the top of
+        # the box, and the two label lines are drawn at the bottom of the same box.
+        # The tallest icon in `icons/` is 130px, which is 1.806in at 72dpi, so a
+        # 1.8in box left the label no room of its own and Graphviz drew the resource
+        # name and type straight over the bottom of the icon. The box is therefore
+        # tall enough for the icon plus the two label lines: 130px of icon and
+        # ~40px of text and margin is 2.35in.
+        "height": "2.35",
         "imagepos": "tc",  # Image at top center
         "fontsize": "10",
         "margin": "0.05,0.02",  # Tighter margins (horizontal, vertical) - reduced from 0.01,0.01

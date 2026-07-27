@@ -182,11 +182,20 @@ def test_diff_marks_a_flagged_path_absent_from_the_after_snapshot_as_changed():
     assert entries["ip"].after == UNKNOWN_MARKER
 
 
-def test_diff_marks_a_flagged_path_absent_from_both_phases_nowhere():
-    """The mask introduces no Attribute_Path of its own."""
-    entries = diff_attributes({"name": "web"}, {"name": "web"}, unknown={"ip": True})
+def test_diff_gives_a_flagged_path_absent_from_both_phases_its_own_row():
+    """A computed attribute names itself, so the mask does introduce its path.
 
-    assert [entry.path for entry in entries] == ["name"]
+    Superseded behaviour: this used to assert the mask introduced no path of its
+    own, which meant an attribute the plan will only know after apply — the bulk
+    of a `create` — never reached the panel at all.
+    """
+    entries = _by_path(diff_attributes({"name": "web"}, {"name": "web"}, unknown={"ip": True}))
+
+    assert set(entries) == {"name", "ip"}
+    assert entries["ip"].state == "added"
+    assert entries["ip"].before is None
+    assert entries["ip"].after == UNKNOWN_MARKER
+    assert entries["name"].state == "unchanged"
 
 
 def test_diff_applies_a_container_level_flag_to_every_path_beneath_it():
@@ -600,3 +609,83 @@ def test_property_7_diff_antisymmetry(pair):
     assert forward["removed"] == reverse["added"]
     assert forward["changed"] == reverse["changed"]
     assert forward["unchanged"] == reverse["unchanged"]
+
+
+# ─── Attributes the plan knows only after apply (Requirement 6.6) ─────────────
+
+
+class TestUnknownOnlyAttributes:
+    """A flagged attribute with no value in either phase still gets a row.
+
+    Terraform emits no value for a computed attribute, so it appears in neither
+    `change.before` nor `change.after` — only in `after_unknown`. Taking just the
+    union of the two snapshots therefore dropped it from the panel, and for a
+    `create`, where most of a resource is computed, that left the Operator looking
+    at little more than the name and the location. `terraform plan` prints those
+    attributes as `(known after apply)`, and so does the Inspector_Panel now.
+    """
+
+    def test_a_flagged_path_absent_from_both_phases_gets_a_row(self):
+        entries = _by_path(
+            diff_attributes({}, {"name": "app-api"}, unknown={"id": True, "default_hostname": True})
+        )
+
+        assert set(entries) == {"name", "id", "default_hostname"}
+        assert entries["id"].after == UNKNOWN_MARKER
+        assert entries["id"].before is None
+        assert entries["id"].state == "added"
+
+    def test_the_row_order_still_holds_with_the_added_paths(self):
+        """Requirement 5.4: the added paths take their place in the sorted order."""
+        entries = diff_attributes(
+            {}, {"name": "x"}, unknown={"zzz_last": True, "aaa_first": True}
+        )
+
+        paths = [entry.path for entry in entries]
+        assert paths == ["aaa_first", "name", "zzz_last"]
+        assert len(paths) == len(set(paths))
+
+    def test_a_flagged_path_that_a_phase_carries_is_not_duplicated(self):
+        """The override still applies to a path that has a value; it gains no twin."""
+        entries = diff_attributes({"sku": "Basic"}, {"sku": "Standard"}, unknown={"sku": True})
+
+        assert [entry.path for entry in entries] == ["sku"]
+        assert entries[0].after == UNKNOWN_MARKER
+        assert entries[0].before == "Basic"
+        assert entries[0].state == "changed"
+
+    def test_a_mask_leaf_that_is_not_true_invents_no_row(self):
+        """Only an exact ``True`` flags an attribute, so a bounded mask adds nothing."""
+        entries = diff_attributes(
+            {}, {"name": "x"}, unknown={"not_a_flag": False, "collapsed": TRUNCATION_MARKER}
+        )
+
+        assert [entry.path for entry in entries] == ["name"]
+
+    def test_no_mask_leaves_the_entry_set_as_the_union(self):
+        """The addition is confined to the mask: without one, nothing changes."""
+        entries = diff_attributes({"a": "1"}, {"b": "2"})
+
+        assert [entry.path for entry in entries] == ["a", "b"]
+
+    def test_a_created_resource_shows_its_computed_attributes(self):
+        """The reported symptom, as a regression anchor.
+
+        A `create` carries an empty before phase and an after phase holding only
+        the attributes the configuration set; everything else is computed. Before
+        this fix the panel showed the two configured attributes alone.
+        """
+        after = {"name": "stassets", "location": "westeurope"}
+        unknown = {
+            "id": True,
+            "primary_blob_endpoint": True,
+            "primary_access_key": True,
+            "identity": [{"principal_id": True}],
+        }
+
+        entries = _by_path(diff_attributes({}, after, unknown=unknown))
+
+        assert {"name", "location"} <= set(entries)
+        assert {"id", "primary_blob_endpoint", "primary_access_key"} <= set(entries)
+        assert entries["identity.0.principal_id"].after == UNKNOWN_MARKER
+        assert all(entries[path].state == "added" for path in entries)

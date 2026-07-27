@@ -1607,11 +1607,10 @@ body {
 }
 .viewer-stage.layer-active > img { display: none; }
 .viewer-stage.image-active > svg { display: none; }
-/* Hit target prepended to each node group: transparent, but still clickable */
+/* Hit target prepended to each activatable node group: transparent, but clickable */
 .viewer-stage rect.ch-hit {
   fill: transparent;
   stroke: none;
-  cursor: pointer;
   pointer-events: all;
 }
 .viewer-stage rect.ch-hit:focus-visible {
@@ -1628,6 +1627,30 @@ body {
   stroke: var(--accent-primary, #0078d4);
   stroke-width: 3;
   stroke-dasharray: 6 3;
+}
+/* Discoverability cue: only an element carrying an Inspector_Record is
+   activatable, so only that element gets the pointer and the hover affordance.
+   Scope containers, layout nodes and the Plan_Diff legend keep the default
+   cursor and stay visually inert. */
+.viewer-stage .ch-activatable,
+.viewer-stage .ch-activatable rect.ch-hit,
+.viewer-stage .ch-activatable > polygon,
+.viewer-stage .ch-activatable > path,
+.viewer-stage .ch-activatable > ellipse,
+.viewer-stage .ch-activatable > text {
+  cursor: pointer;
+}
+/* The hover affordance stands down on the selected element, so the selection
+   indicator of Requirement 8.7 is never overpainted by a hover state. */
+.viewer-stage .ch-activatable:not(.ch-selected):hover rect.ch-hit {
+  fill: var(--accent-primary, #0078d4);
+  fill-opacity: 0.08;
+}
+.viewer-stage .ch-activatable:not(.ch-selected):hover > polygon,
+.viewer-stage .ch-activatable:not(.ch-selected):hover > path,
+.viewer-stage .ch-activatable:not(.ch-selected):hover > ellipse {
+  stroke: var(--accent-primary, #0078d4);
+  stroke-width: 2;
 }
 
 /* ─── Interactive Resource Inspector: panel ─── */

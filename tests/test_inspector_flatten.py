@@ -661,6 +661,12 @@ def test_property_flatten_round_trip(drawn):
 # produced Attribute_Entry list equals the union of the Attribute_Paths of the
 # two flattened snapshots in ascending lexicographic order — no input path is
 # dropped, no path is invented, and no path appears twice.
+#
+# The property is quantified over the no-mask case, which is what it says: with an
+# `after_unknown` mask the entry set is the union *plus* the attributes the plan
+# says it cannot know yet, since those carry a value in neither snapshot and would
+# otherwise be missing from the panel. `TestUnknownOnlyAttributes` in
+# `tests/test_inspector_diff.py` pins that addition.
 @settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(pair=snapshot_pairs())
 def test_property_path_coverage_and_ordering(pair):

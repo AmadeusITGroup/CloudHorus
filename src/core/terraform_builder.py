@@ -87,6 +87,10 @@ class TerraformTemplateBuilder:
         # Single-entry identity cache for sensitivity lookups. The document reference is
         # kept alongside its id so the id stays valid while the cache is live.
         self._sensitive_cache: Optional[Tuple[int, Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = None
+        # Resources of the document being described that carry no plan change entry. Counted
+        # rather than warned about per resource: an input with no plan data has none for any
+        # resource, so `_attach_inspector_values` reports the total once.
+        self._inspector_no_change_entries: int = 0
 
     def validate_terraform_cli(self) -> bool:
         """Return True when the Terraform CLI is available."""
@@ -178,16 +182,36 @@ class TerraformTemplateBuilder:
     def _attach_inspector_values(
         self, document: LocalTemplateDocument, terraform_json: Dict[str, Any]
     ) -> None:
-        """Attach the redacted inspector triple to every resource of the document.
+        """Attach the redacted inspector triple and the address to every resource.
 
         Called only when Inspector_Mode is enabled, and only after `_apply_change_model` has
         assigned the Change_Categories, so each resource resolves its phases through the
         category table (Requirement 6). A resource the helper cannot describe keeps
         `inspector_values` at `None` (Requirements 1.5, 10.1).
+
+        The Terraform address is published on the same opt-in: `inspector_address` is what
+        makes `to_renderer_resource` emit the `address` key, which is the only route by which
+        the address reaches the Inspector_Record the panel displays (Requirements 4.4, 5.5).
+
+        A resource carrying no plan change entry at all is normal — a state file and a
+        plan-less JSON document carry none for any resource — so it is counted here and
+        reported once for the document rather than warned about per resource.
         """
+        self._inspector_no_change_entries = 0
         for resource in document.resources:
             resource.inspector_values = self._inspector_values_for(
                 terraform_json, resource, resource.change_category
+            )
+            resource.inspector_address = resource.address or None
+
+        missing = self._inspector_no_change_entries
+        self._inspector_no_change_entries = 0
+        if missing:
+            self.logger.info(
+                "No plan change entry for %d of %d resources; the Inspector shows their current "
+                "configuration on both sides",
+                missing,
+                len(document.resources),
             )
 
     def _merge_change_resources(
@@ -279,9 +303,24 @@ class TerraformTemplateBuilder:
         ]
 
     def build_document_from_source(
-        self, terraform_root_dir: str, var_files: Optional[List[str]] = None
+        self,
+        terraform_root_dir: str,
+        var_files: Optional[List[str]] = None,
+        collect_inspector_values: bool = False,
     ) -> LocalTemplateDocument:
-        """Build a normalized local template document from local Terraform source files."""
+        """Build a normalized local template document from local Terraform source files.
+
+        `collect_inspector_values` is trailing and defaulted to `False`, which is Inspector_Mode
+        off: nothing new is computed and the document is the one the release preceding this
+        feature builds (Requirement 1.5).
+
+        With it `True`, the same :meth:`_attach_inspector_values` the JSON path uses fills each
+        resource's triple from the full Terraform attribute map `_normalize_resource` already
+        placed in `raw_values`, so an HCL-mode panel shows the whole configuration rather than
+        the thin mapped `properties` (Requirements 10.1, 10.4). There is no plan file in this
+        mode, so both snapshots are the same redacted attribute map and every Attribute_Entry
+        resolves `unchanged` (Requirements 6.5, 6.9).
+        """
         abs_root_dir = os.path.abspath(terraform_root_dir)
         if not os.path.isdir(abs_root_dir):
             raise FileNotFoundError(terraform_root_dir)
@@ -290,7 +329,7 @@ class TerraformTemplateBuilder:
         raw_resources, config_resources = self._collect_source_module_resources(abs_root_dir, variable_values)
         planned_resources = self._build_planned_resources_from_source(raw_resources)
 
-        return self._build_document_from_resources(
+        document = self._build_document_from_resources(
             planned_resources=planned_resources,
             config_resources=config_resources,
             source_format="terraform-source-hcl",
@@ -299,6 +338,13 @@ class TerraformTemplateBuilder:
                 "varFiles": [os.path.abspath(path) for path in (var_files or [])],
             },
         )
+
+        if collect_inspector_values:
+            # No plan document exists in this mode: an empty one carries no change entry and no
+            # sensitivity mask, which is what makes every phase resolve to the attribute map.
+            self._attach_inspector_values(document, {})
+
+        return document
 
     def _build_document_from_resources(
         self,
@@ -412,11 +458,23 @@ class TerraformTemplateBuilder:
             return None
 
     def build_terraform_source(
-        self, terraform_root_dir: str, var_files: Optional[List[str]] = None, output_file: Optional[str] = None
+        self,
+        terraform_root_dir: str,
+        var_files: Optional[List[str]] = None,
+        output_file: Optional[str] = None,
+        collect_inspector_values: bool = False,
     ) -> Optional[str]:
-        """Parse local Terraform HCL source files into the renderer contract without contacting Azure."""
+        """Parse local Terraform HCL source files into the renderer contract without contacting Azure.
+
+        `collect_inspector_values` follows `output_file` as the last parameter and defaults to
+        `False`: with Inspector_Mode off no `address` and no `inspectorValues` key reaches the
+        written Renderer_Template, which stays key-for-key what the release preceding this
+        feature wrote (Requirements 1.5, 10.1).
+        """
         try:
-            document = self.build_document_from_source(terraform_root_dir, var_files)
+            document = self.build_document_from_source(
+                terraform_root_dir, var_files, collect_inspector_values=collect_inspector_values
+            )
             renderer_template = document.to_renderer_template()
 
             if output_file is None:
@@ -936,7 +994,13 @@ class TerraformTemplateBuilder:
             # `unchanged`, an unrecognized category, or no category at all: one tree on both
             # sides, so every Attribute_Entry of the resource lands `unchanged`.
             if change is None:
-                self.logger.warning(
+                # Normal, not an anomaly: a state file, a plan-less JSON document and a
+                # Terraform source tree carry no change entry for any resource, so a warning
+                # per resource is thousands of warnings for the expected case. The genuine
+                # anomaly — a change entry that omits a phase its Change_Category requires —
+                # stays a warning, in `_warn_missing_change_phase` (Requirements 6.7, 6.8).
+                self._inspector_no_change_entries += 1
+                self.logger.debug(
                     "Resource %s carries no plan change entry; the Inspector shows its current "
                     "configuration on both sides",
                     address or "<unknown address>",

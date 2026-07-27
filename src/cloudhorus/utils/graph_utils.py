@@ -13,7 +13,11 @@ class GraphNodeBuilder:
     def __init__(self):
         """Initialize the node builder with default attributes."""
         self.default_width = "1.8"
-        self.default_height = "1.8"
+        # Tall enough for the natural-size icon at the top plus the two label lines
+        # at the bottom: the tallest icon is 130px (1.806in at 72dpi), so the former
+        # 1.8in box made Graphviz draw the label over the icon. Kept in step with
+        # `src/utils/graph_utils.py`, which the mirror parity test compares against.
+        self.default_height = "2.35"
         self.default_fontsize = "10"
         self.default_margin = "0.05,0.02"
 
