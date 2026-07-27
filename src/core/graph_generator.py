@@ -776,6 +776,52 @@ _DOT_TABLE_CELL_RE = re.compile(r"<TD[^>]*>(?P<cell>.*?)</TD>", re.IGNORECASE | 
 _LABEL_SEGMENT_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _MARKUP_RE = re.compile(r"<[^>]*>")
 
+#: First table cell of an HTML-like node label, however it is spelled. The old
+#: pattern for this was ``<TR><TD>([^<]+)</TD></TR>``, which cannot match a
+#: change-decorated label: the Flag_Token puts a ``<FONT>`` element inside that
+#: cell, so ``[^<]+`` fails and the node never reaches the display-name map. Every
+#: decorated node then fell out of the Draw.io fixes that depend on that map.
+_DOT_LABEL_FIRST_CELL_RE = re.compile(r"<TD[^>]*>(.*?)</TD>", re.IGNORECASE | re.DOTALL)
+
+
+#: Leading Flag_Token and padding of a decorated label, stripped so a decorated and
+#: an undecorated cell yield the same resource name.
+_LABEL_FLAG_PREFIX_RE = re.compile(r"^[+\-~\u00b1\s]+")
+
+
+def _drawio_cell_display_name(value: str) -> Optional[str]:
+    """The resource name held in a Draw.io node cell label.
+
+    An undecorated cell reads ``name<br/>type``, so the name is the first line. A
+    change-decorated cell reads ``+<br/> name<br/>type``: graphviz2drawio puts the
+    Flag_Token on a line of its own, so the first line carries no name at all. Both
+    are handled by taking the first line that holds more than a Flag_Token.
+    """
+    if not value:
+        return None
+    text = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    text = html.unescape(_MARKUP_RE.sub("", text))
+    for line in text.split("\n"):
+        name = _LABEL_FLAG_PREFIX_RE.sub("", line).strip()
+        if name:
+            return name
+    return None
+
+
+def _dot_label_display_name(text: str) -> Optional[str]:
+    """The resource name held in the first cell of an HTML-like node label.
+
+    Markup inside the cell is stripped rather than rejected, so a plain label and a
+    label carrying the Change_Style Flag_Token yield the same name.
+    """
+    match = _DOT_LABEL_FIRST_CELL_RE.search(text or "")
+    if match is None:
+        return None
+    name = html.unescape(_MARKUP_RE.sub("", match.group(1)))
+    # The decorated cell holds the Flag_Token before the name, and the Draw.io side
+    # drops it, so both have to agree on the bare name.
+    return _LABEL_FLAG_PREFIX_RE.sub("", name).strip() or None
+
 #: Style prefix graphviz2drawio produces for an icon node. Re-applied to node
 #: cells whose icon the converter dropped, so a change-decorated node keeps the
 #: shape and icon it has without Plan_Diff_Mode (Requirement 8.6).
@@ -1019,6 +1065,172 @@ def _icon_data_uri(icon_path: str, cache: Dict[str, Optional[str]]) -> Optional[
     return uri
 
 
+#: Graphviz writes its SVG with a 4-point margin on each axis, and graphviz2drawio
+#: carries that margin into the Draw.io coordinates. Measured against `dot -Tplain`
+#: the vertical offset it produces is exactly this, so the same constant is applied
+#: when the authoritative geometry is written back.
+_DRAWIO_MARGIN = 4.0
+
+#: Points per inch. `dot -Tplain` and the pygraphviz `width` / `height` attributes
+#: are in inches, while `pos` and `bb` are already in points.
+_POINTS_PER_INCH = 72.0
+
+
+def dot_layout_geometry(dot_source: str) -> Optional[Dict[str, Any]]:
+    """Lay the DOT source out and return the box of every node and every cluster.
+
+    This is the geometry the PNG is drawn from, so it is the geometry the Draw.io
+    file has to carry. It is read here rather than taken from graphviz2drawio
+    because the converter sizes a node cell from the icon image instead of the
+    Graphviz node box: measured on the landing-zone sample, every cell came out
+    130x142 or 142x142 where the layout says 130x169, 158x169 and 193x169, and the
+    resulting horizontal positions were wrong by -229 to +219 points — the diagram
+    squeezed inward, which is what makes the export disagree with the PNG. The
+    vertical positions the converter produces already match to the point, and the
+    measurement that established that is what fixes ``_DRAWIO_MARGIN``.
+
+    The layout is taken from the ``dot`` binary and only *parsed* with pygraphviz,
+    and the split matters. Measured on the landing-zone sample, ``dot -Tplain`` over
+    the written file is reproducible — six invocations produced one identical digest
+    — while laying the same text out through ``pygraphviz.AGraph.layout()`` gave a
+    different answer every call: the ``snet-app`` container landed at x=2276, 1828,
+    2047 and 2495 across four runs, and the two subnet containers swapped sides.
+    That pygraphviz path is the one graphviz2drawio itself uses, which is why the
+    exported positions look arbitrary. Parsing is unaffected by this, so pygraphviz
+    is still used to read the laid-out graph.
+
+    Returns ``None`` when the layout or the parse fails, in which case the caller
+    keeps whatever geometry the converter produced.
+    """
+    try:
+        import pygraphviz
+    except ImportError:
+        logger.debug("pygraphviz is unavailable; the Draw.io export keeps the converter geometry")
+        return None
+
+    try:
+        completed = subprocess.run(
+            [DOT_BINARY, "-Tdot"],
+            input=dot_source,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        logger.warning(f"Could not lay out the DOT source for the Draw.io geometry: {error}")
+        return None
+
+    try:
+        # The graph is already laid out, so no `layout()` call here: parsing is
+        # reproducible, computing the layout through pygraphviz is not.
+        graph = pygraphviz.AGraph(string=completed.stdout)
+    except Exception as error:  # noqa: BLE001 - any parse failure falls back
+        logger.warning(f"Could not read the laid-out DOT source for the Draw.io geometry: {error}")
+        return None
+
+    def _floats(raw: Any, count: int) -> Optional[List[float]]:
+        try:
+            parts = [float(piece) for piece in str(raw).replace(" ", "").split(",")]
+        except (TypeError, ValueError):
+            return None
+        return parts if len(parts) == count else None
+
+    bounds = _floats(graph.graph_attr.get("bb"), 4)
+    if bounds is None:
+        logger.warning("The laid-out DOT source carries no graph bounding box")
+        return None
+    height = bounds[3]
+
+    nodes: Dict[str, Tuple[float, float, float, float]] = {}
+    for node in graph.nodes():
+        centre = _floats(node.attr.get("pos"), 2)
+        if centre is None:
+            continue
+        try:
+            width = float(node.attr.get("width")) * _POINTS_PER_INCH
+            node_height = float(node.attr.get("height")) * _POINTS_PER_INCH
+        except (TypeError, ValueError):
+            continue
+        nodes[str(node)] = (
+            centre[0] - width / 2 + _DRAWIO_MARGIN,
+            height - (centre[1] + node_height / 2) + _DRAWIO_MARGIN,
+            width,
+            node_height,
+        )
+
+    clusters: Dict[str, Tuple[float, float, float, float]] = {}
+
+    def _collect(container: Any) -> None:
+        for subgraph in container.subgraphs():
+            box = _floats(subgraph.graph_attr.get("bb"), 4)
+            if box is not None:
+                x1, y1, x2, y2 = box
+                clusters[str(subgraph.get_name())] = (
+                    x1 + _DRAWIO_MARGIN,
+                    height - y2 + _DRAWIO_MARGIN,
+                    x2 - x1,
+                    y2 - y1,
+                )
+            _collect(subgraph)
+
+    _collect(graph)
+
+    logger.debug(f"Authoritative Draw.io geometry: {len(nodes)} nodes, {len(clusters)} clusters")
+    return {"height": height, "nodes": nodes, "clusters": clusters}
+
+
+def apply_authoritative_geometry(
+    root: Any,
+    geometry: Optional[Dict[str, Any]],
+    xml_node_to_dot_name: Dict[str, str],
+    cluster_id_map: Dict[str, Dict[str, Any]],
+) -> int:
+    """Overwrite every located cell's ``mxGeometry`` with the Graphviz layout box.
+
+    Only cells whose Graphviz counterpart could be resolved are touched, and every
+    coordinate is absolute, which is consistent because the cells are kept flat
+    under the diagram root rather than reparented. A cell left unresolved keeps the
+    geometry the converter gave it, so a mapping gap costs fidelity for that one
+    cell instead of moving it somewhere arbitrary.
+
+    Returns the number of cells whose geometry was rewritten.
+    """
+    if not geometry:
+        return 0
+
+    nodes = geometry.get("nodes") or {}
+    clusters = geometry.get("clusters") or {}
+    rewritten = 0
+
+    for cell in root.findall(".//mxCell"):
+        cell_id = cell.get("id", "")
+        box = None
+        if cell_id.startswith("node"):
+            dot_name = xml_node_to_dot_name.get(cell_id)
+            if dot_name:
+                box = nodes.get(dot_name)
+        elif cell_id.startswith("clust"):
+            mapped = cluster_id_map.get(cell_id)
+            if mapped:
+                box = clusters.get(str(mapped.get("name")))
+        if box is None:
+            continue
+
+        mx_geometry = cell.find("mxGeometry")
+        if mx_geometry is None:
+            continue
+        x, y, width, height = box
+        mx_geometry.set("x", f"{x:.2f}")
+        mx_geometry.set("y", f"{y:.2f}")
+        mx_geometry.set("width", f"{width:.2f}")
+        mx_geometry.set("height", f"{height:.2f}")
+        rewritten += 1
+
+    if rewritten:
+        logger.info(f"✓ Aligned {rewritten} Draw.io cells with the Graphviz layout")
+    return rewritten
+
+
 def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
     """
     Post-process graphviz2drawio XML to create proper nested containers.
@@ -1201,25 +1413,21 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
                     current_node_id = node_start_match.group(1)
                     in_node_definition = True
                     # Check if label is on the same line
-                    if "<TR><TD>" in line:
-                        label_match = re.search(r"<TR><TD>([^<]+)</TD></TR>", line)
-                        if label_match:
-                            display_name = label_match.group(1).strip()
-                            if display_name not in display_name_to_dot_ids:
-                                display_name_to_dot_ids[display_name] = []
-                            display_name_to_dot_ids[display_name].append(current_node_id)
-                            logger.debug(f"Display name '{display_name}' maps to DOT ID '{current_node_id}'")
-            # Inside a node definition, look for the label
-            elif in_node_definition:
-                if "<TR><TD>" in line:
-                    label_match = re.search(r"<TR><TD>([^<]+)</TD></TR>", line)
-                    if label_match:
-                        display_name = label_match.group(1).strip()
+                    display_name = _dot_label_display_name(line)
+                    if display_name:
                         if display_name not in display_name_to_dot_ids:
                             display_name_to_dot_ids[display_name] = []
-                        if current_node_id is not None:
-                            display_name_to_dot_ids[display_name].append(current_node_id)
+                        display_name_to_dot_ids[display_name].append(current_node_id)
                         logger.debug(f"Display name '{display_name}' maps to DOT ID '{current_node_id}'")
+            # Inside a node definition, look for the label
+            elif in_node_definition:
+                display_name = _dot_label_display_name(line)
+                if display_name:
+                    if display_name not in display_name_to_dot_ids:
+                        display_name_to_dot_ids[display_name] = []
+                    if current_node_id is not None:
+                        display_name_to_dot_ids[display_name].append(current_node_id)
+                    logger.debug(f"Display name '{display_name}' maps to DOT ID '{current_node_id}'")
                 # End of node definition: ];
                 if "];" in line:
                     in_node_definition = False
@@ -1233,11 +1441,11 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
             if cell_id.startswith("node"):
                 # Extract the actual node name from the label
                 value = cell.get("value", "")
-                # Parse the label to get the first line (node name)
-                # Format: <font ...>node-name<br/>type</font>
-                name_match = re.search(r">([^<]+)<br", value)
-                if name_match:
-                    display_name = name_match.group(1).strip()
+                # Format: <font ...>node-name<br/>type</font>, and with a
+                # Change_Style decoration the name is preceded by the Flag_Token in
+                # its own element, so the markup is stripped rather than matched.
+                display_name = _drawio_cell_display_name(value)
+                if display_name:
                     # Lookup full DOT node IDs from display name
                     dot_ids = display_name_to_dot_ids.get(display_name, [display_name])
 
@@ -1766,9 +1974,19 @@ def fix_drawio_hierarchy(dot_source: str, xml_content: str) -> str:
             if cells_to_remove:
                 logger.info(f"✓ Cleaned {len(cells_to_remove)} broken/invisible edges from DrawIO XML")
 
+        # Last, so no styling pass above can move a cell again: replace the geometry
+        # graphviz2drawio derived from the icon images with the Graphviz layout box,
+        # which is the geometry the PNG is drawn from.
+        apply_authoritative_geometry(
+            root,
+            dot_layout_geometry(dot_source),
+            xml_node_to_dot_name,
+            cluster_id_map,
+        )
+
         # Convert back to string
         fixed_xml = ET.tostring(root, encoding="unicode")
-        logger.info(f"✓ Fixed cluster hierarchy for Draw.io (clusters + nodes + colors)")
+        logger.info(f"✓ Fixed cluster hierarchy for Draw.io (clusters + nodes + colors + geometry)")
         return fixed_xml
 
     except Exception as e:
