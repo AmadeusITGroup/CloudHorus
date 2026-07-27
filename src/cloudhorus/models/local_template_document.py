@@ -18,6 +18,7 @@ class LocalTemplateResource:
     extra_fields: Dict[str, Any] = field(default_factory=dict)
     raw_values: Dict[str, Any] = field(default_factory=dict)
     change_category: Optional[str] = None
+    inspector_values: Optional[Dict[str, Any]] = None
 
     def to_renderer_resource(self) -> Dict[str, Any]:
         """Convert the normalized resource into the current renderer contract."""
@@ -33,6 +34,8 @@ class LocalTemplateResource:
                 resource[key] = value
         if self.change_category is not None:
             resource["changeCategory"] = self.change_category
+        if self.inspector_values is not None:
+            resource["inspectorValues"] = self.inspector_values
         return resource
 
 

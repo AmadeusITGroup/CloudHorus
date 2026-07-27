@@ -42,6 +42,15 @@ from .azure_cli import (
     login_to_tenant,
 )
 from .bicep_builder import build_bicep_template
+from .inspector import (
+    INTERACTION_LAYER_SUFFIX,
+    SUBNET_KIND,
+    VNET_KIND,
+    InspectorCollector,
+    NullInspectorCollector,
+    write_inspector_payload,
+    write_svg_with_embedded_icons,
+)
 from .plan_diff import (
     CHANGE_CATEGORIES,
     NO_RESOURCE_ENTRY_REASON,
@@ -122,6 +131,68 @@ def resolve_subnet_change_category(
     return category
 
 
+#: Key of the per-resource-group Inspector source index: (resource name, renderer
+#: resource type) — the same shape as `ChangeIndexKey`, because the render pass
+#: reaches an Inspector source by exactly the pair it reaches a Change_Category by.
+InspectorSourceKey = Tuple[str, str]
+
+
+def build_inspector_source_index(resources: Any) -> Dict[InspectorSourceKey, Any]:
+    """Index the resource entries of one template by (name, renderer type).
+
+    Two Interaction_Layer elements are reached by name rather than by the dict in
+    scope: the node placed inside a subnet subgraph, whose creation site holds the
+    parent VNet in `resource`, and the subnet cluster, whose standalone resource
+    entry carries the `inspectorValues` triple the embedded `subnets` entry has no
+    way to hold (Requirements 9.5, 9.6). This index is what turns either into an
+    O(1) lookup instead of a scan of the resource list per element.
+
+    The first entry of a duplicated key is kept, which is the same
+    first-write-wins discipline `InspectorCollector` applies to a duplicated
+    Inspector_Key. A malformed entry is skipped rather than raising, so a template
+    the Inspector cannot describe never costs the run its Diagram.
+    """
+    index: Dict[InspectorSourceKey, Any] = {}
+    if not isinstance(resources, list):
+        return index
+
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        name = resource.get("name")
+        resource_type = resource.get("type")
+        if not isinstance(name, str) or not isinstance(resource_type, str):
+            continue
+        index.setdefault((name, resource_type), resource)
+    return index
+
+
+def resolve_subnet_inspector_source(
+    inspector_sources: Dict[InspectorSourceKey, Any],
+    vnet_name: str,
+    subnet_name: str,
+    subnet_entry: Any,
+) -> Any:
+    """Return the source dict that describes one subnet cluster.
+
+    The standalone subnet resource is preferred, resolved by the compound
+    Renderer_Template name `"<vnet>/<subnet>"` first and the bare subnet name
+    second, which is the order `resolve_subnet_change_category` already applies
+    (Requirement 9.6). When the Renderer_Template carries no standalone subnet
+    resource the entry embedded in the parent VNet's `properties["subnets"]` is
+    used instead, so a subnet drawn from that list is still described
+    (Requirement 9.5).
+    """
+    if inspector_sources and subnet_name:
+        compound = f"{vnet_name}/{subnet_name}" if vnet_name else subnet_name
+        source = inspector_sources.get((compound, SUBNET_RENDERER_TYPE))
+        if source is None:
+            source = inspector_sources.get((subnet_name, SUBNET_RENDERER_TYPE))
+        if source is not None:
+            return source
+    return subnet_entry
+
+
 def apply_cluster_change_style(
     label: str,
     attributes: Dict[str, str],
@@ -156,13 +227,29 @@ def style_subnet_cluster(
     subnet_cidr: Any,
     vnet_name: str,
     change_index: Dict[ChangeIndexKey, str],
+    inspector: Optional[InspectorCollector] = None,
+    subnet_source: Any = None,
+    resource_group: str = "",
 ) -> None:
     """Emit the cluster attributes of one subnet subgraph, decoration included.
 
     The render pass opens `cluster_subnet<name>` from four different places; all
     four emit the same label and the same legacy attributes, so they share this
     helper rather than repeating the block.
+
+    Because all four sites funnel through here, this is also where the subnet's
+    Inspector_Record is collected, keyed by the Cluster_Key `cluster_subnet<name>`
+    (Requirements 3.3, 3.5, 4.8). `inspector` is the run's collector — the
+    `NullInspectorCollector` when Inspector_Mode is off, which makes the call free
+    — and `subnet_source` is the source dict resolved by
+    `resolve_subnet_inspector_source`. The trailing defaults keep every
+    pre-feature call site source-compatible.
     """
+    if inspector is not None:
+        inspector.record_cluster(
+            f"cluster_subnet{subnet_name}", SUBNET_KIND, subnet_source, resource_group
+        )
+
     label = (
         "<<TABLE border='0' cellborder='0' cellspacing='0' cellpadding='0'>"
         f"<TR><TD align='center' rowspan='2'><img src='{ICONS_DIR}/subnets.png' scale='true'/></TD>"
@@ -299,6 +386,93 @@ def write_change_summary_sidecar(summary: ChangeSummary, output_filename: str) -
 
     logger.info(f"Saved change summary: {os.path.abspath(sidecar_path)}")
     return sidecar_path
+
+
+#: Layout engine binary the Inspector_Mode render branch invokes directly. The
+#: name is resolved by the OS through `PATH`, exactly as the Graphviz Python
+#: library resolves it, so the two branches drive the same engine.
+DOT_BINARY: str = "dot"
+
+#: Layout algorithm passed to that binary, matching the `dot` engine the
+#: Digraph is built with, so the Interaction_Layer geometry is the geometry of
+#: the PNG (Requirement 3.9).
+DOT_LAYOUT_FLAG: str = "-Kdot"
+
+
+def render_with_interaction_layer(dot: Any, output_filename: str) -> Optional[str]:
+    """Render the PNG and the Interaction_Layer from one Graphviz layout pass.
+
+    The DOT source is saved to the same extension-less path `dot.render` would
+    write it to, then one `dot` invocation emits both formats from that one
+    source: `-Tpng -o <diagram>.png -Tsvg -o <diagram>.svg`. The measured spike
+    behind this design showed the PNG of that dual-format invocation to be
+    byte-identical to the PNG the library render produces, which is what lets
+    Requirement 3.1 (one layout pass) and Requirement 1.6 (the same PNG as a
+    disabled run) hold at the same time.
+
+    The argument vector is fixed and every path is a separate element, never a
+    shell string, so a resource name that reaches a filename cannot inject a
+    command.
+
+    The SVG Graphviz writes references every icon by an absolute path of the
+    generating machine, so it is post-processed through
+    `write_svg_with_embedded_icons`, which hoists one data-URI `<image>` per
+    distinct icon group into `<defs>` and discards the layer entirely if it
+    cannot (Requirement 3.7).
+
+    Any failure of that chain — no `dot` on `PATH`, a non-zero exit, an output
+    file the invocation did not produce, an unreadable icon, malformed SVG — is a
+    warning followed by the disabled-mode render call, so the PNG lands at its
+    path either way (Requirements 1.9, 3.8).
+
+    Args:
+        dot: The Graphviz object the render pass built.
+        output_filename: The extension-less diagram path.
+
+    Returns:
+        The Interaction_Layer path, or `None` when only the PNG was produced.
+    """
+    png_path = f"{output_filename}.png"
+    svg_path = f"{output_filename}{INTERACTION_LAYER_SUFFIX}"
+
+    try:
+        dot.save(output_filename)
+        subprocess.run(
+            [
+                DOT_BINARY,
+                DOT_LAYOUT_FLAG,
+                "-Tpng",
+                "-o",
+                png_path,
+                "-Tsvg",
+                "-o",
+                svg_path,
+                output_filename,
+            ],
+            check=True,
+        )
+        for produced in (png_path, svg_path):
+            if not os.path.exists(produced):
+                raise OSError(f"the layout pass produced no {produced}")
+        if write_svg_with_embedded_icons(svg_path) is None:
+            raise ValueError(f"the Interaction_Layer {svg_path} was discarded")
+    except Exception as error:  # noqa: BLE001 - the layer is optional, the PNG is not
+        logger.warning(f"Could not produce the Interaction_Layer: {type(error).__name__}: {error}")
+        _discard_interaction_layer(svg_path)
+        dot.render(output_filename, format="png")
+        return None
+
+    logger.info(f"Saved interaction layer: {os.path.abspath(svg_path)}")
+    return svg_path
+
+
+def _discard_interaction_layer(svg_path: str) -> None:
+    """Remove a partially written Interaction_Layer, ignoring a failure to do so."""
+    try:
+        if os.path.exists(svg_path):
+            os.remove(svg_path)
+    except OSError as error:  # pragma: no cover - defensive
+        logger.warning(f"Could not remove the partial interaction layer {svg_path}: {error}")
 
 
 #: Flag_Tokens the Change_Style table can prepend to a node label. Longest
@@ -1558,6 +1732,7 @@ def generate_resource_graph(
     terraform_root_dirs=None,
     terraform_var_files=None,
     change_types=None,
+    interactive_inspector=False,
 ):
     """
     Generate Azure resource graph visualization.
@@ -1590,6 +1765,9 @@ def generate_resource_graph(
         terraform_root_dirs: List of Terraform working directories (required when local_template_mode is `terraform-source`)
         terraform_var_files: List of Terraform var files aligned to terraform_root_dirs
         change_types: Terraform plan Change_Categories to display (None = every category)
+        interactive_inspector: If True, enable Inspector_Mode for this run: the
+            Interaction_Layer and the Inspector_Payload are produced beside the
+            PNG. False (the default) is the pre-feature path, byte for byte.
     """
     start_time = time.time()
 
@@ -1626,6 +1804,7 @@ def generate_resource_graph(
             start_time,
             _heartbeat,
             change_types,
+            interactive_inspector,
         )
     finally:
         _heartbeat.__exit__(None, None, None)
@@ -1657,6 +1836,7 @@ def _generate_resource_graph_inner(
     start_time,
     _heartbeat,
     change_types=None,
+    interactive_inspector=False,
 ):
     """Inner implementation of generate_resource_graph (wrapped by heartbeat)."""
 
@@ -1668,6 +1848,15 @@ def _generate_resource_graph_inner(
     change_index: Dict[ChangeIndexKey, str] = {}
     aggregate_counts: Dict[str, int] = {}
     aggregate_summary: List[Any] = []
+
+    # ── Inspector_Mode state ──────────────────────────────────────────────
+    # The collector is swapped rather than guarded: the record calls sit eight
+    # to ten levels deep inside the render pass, so `NullInspectorCollector`
+    # keeps the Inspector_Mode-off path free of new branching and free of cost
+    # (Requirements 1.5, 2.8, 4.8, 10.1).
+    inspector: InspectorCollector = (
+        InspectorCollector() if interactive_inspector else NullInspectorCollector()
+    )
 
     # Register local templates FIRST if in offline mode (before any Azure calls)
     if use_local_template:
@@ -1705,6 +1894,13 @@ def _generate_resource_graph_inner(
                 # passed when the Operator made a selection, so a run without
                 # `--changeTypes` reaches the builder exactly as it did before.
                 builder_kwargs = {} if change_types is None else {"change_types": change_types}
+                # `collect_inspector_values` follows the same discipline: it is only
+                # passed when the Operator enabled Inspector_Mode, so a run without
+                # `--interactiveInspector` reaches the builder with the pre-feature
+                # argument list and gets the pre-feature Renderer_Template
+                # (Requirements 1.5, 10.1).
+                if interactive_inspector:
+                    builder_kwargs["collect_inspector_values"] = True
                 template_file = build_terraform_template(terraform_json_file, **builder_kwargs)
                 if not template_file:
                     logger.error(f"Failed to build Terraform template {i+1}: {terraform_json_file}")
@@ -2081,6 +2277,17 @@ def _generate_resource_graph_inner(
                                             # Extract resources and dependencies
                                             resources = template.get("resources", [])
 
+                                            # Inspector source index for the two elements the render
+                                            # pass reaches by name rather than by the dict in scope:
+                                            # the subnet-placed node and the subnet cluster. Built
+                                            # once per resource group, and only in Inspector_Mode, so
+                                            # the disabled path pays for an empty dict literal.
+                                            inspector_sources: Dict[InspectorSourceKey, Any] = (
+                                                build_inspector_source_index(resources)
+                                                if interactive_inspector
+                                                else {}
+                                            )
+
                                             # ── Pre-fetch RG-level data ONCE (avoid redundant API calls per resource) ──
                                             _pre_t0 = time.time()
                                             if use_local_template:
@@ -2412,6 +2619,15 @@ def _generate_resource_graph_inner(
                                                                     resource.get("changeCategory"),
                                                                 )
                                                                 vnet_subgraph.attr(label=vnet_label, **vnet_attributes)
+                                                                # The VNet is drawn as a container, so its
+                                                                # Inspector_Key is the Cluster_Key
+                                                                # `cluster_vnet<name>` (Requirements 3.3, 3.5).
+                                                                inspector.record_cluster(
+                                                                    "cluster_vnet" + resource_name,
+                                                                    VNET_KIND,
+                                                                    resource,
+                                                                    resourceGroup,
+                                                                )
                                                                 # add empty node for rank control
                                                                 vnet_subgraph.node(
                                                                     subscription_id + "invis",
@@ -2554,6 +2770,14 @@ def _generate_resource_graph_inner(
                                                                                 subnet_cidr,
                                                                                 resource_name,
                                                                                 change_index,
+                                                                                inspector,
+                                                                                resolve_subnet_inspector_source(
+                                                                                    inspector_sources,
+                                                                                    resource_name,
+                                                                                    subnet_name,
+                                                                                    subnet,
+                                                                                ),
+                                                                                resourceGroup,
                                                                             )
                                                                             subnet_subgraph.node(
                                                                                 subnet_name,
@@ -2640,6 +2864,14 @@ def _generate_resource_graph_inner(
                                                                                             subnet_cidr,
                                                                                             resource_name,
                                                                                             change_index,
+                                                                                            inspector,
+                                                                                            resolve_subnet_inspector_source(
+                                                                                                inspector_sources,
+                                                                                                resource_name,
+                                                                                                subnet_name,
+                                                                                                subnet,
+                                                                                            ),
+                                                                                            resourceGroup,
                                                                                         )
                                                                                         add_node_in_subgraph(
                                                                                             subnet_subgraph,
@@ -2653,6 +2885,21 @@ def _generate_resource_graph_inner(
                                                                                                     resource_type,
                                                                                                 )
                                                                                             ),
+                                                                                        )
+                                                                                        # The subnet-placed node is
+                                                                                        # keyed by the Node_Key
+                                                                                        # `<resource_name>-<resource_group>`
+                                                                                        # the Graph_Pipeline gave it
+                                                                                        # (Requirements 3.2, 3.4).
+                                                                                        inspector.record_node(
+                                                                                            node_id,
+                                                                                            inspector_sources.get(
+                                                                                                (
+                                                                                                    subnet_resource_name,
+                                                                                                    resource_type,
+                                                                                                )
+                                                                                            ),
+                                                                                            resourceGroup,
                                                                                         )
                                                                                 if subnet_resource_name == subnet_name:
                                                                                     if (
@@ -2681,6 +2928,14 @@ def _generate_resource_graph_inner(
                                                                                                 subnet_cidr,
                                                                                                 resource_name,
                                                                                                 change_index,
+                                                                                                inspector,
+                                                                                                resolve_subnet_inspector_source(
+                                                                                                    inspector_sources,
+                                                                                                    resource_name,
+                                                                                                    subnet_name,
+                                                                                                    subnet,
+                                                                                                ),
+                                                                                                resourceGroup,
                                                                                             )
                                                                                             subnet_resources_icon_path = get_icon(
                                                                                                 dep_type
@@ -2734,6 +2989,14 @@ def _generate_resource_graph_inner(
                                                                                     subnet_cidr,
                                                                                     resource_name,
                                                                                     change_index,
+                                                                                    inspector,
+                                                                                    resolve_subnet_inspector_source(
+                                                                                        inspector_sources,
+                                                                                        resource_name,
+                                                                                        subnet_name,
+                                                                                        subnet,
+                                                                                    ),
+                                                                                    resourceGroup,
                                                                                 )
                                                                                 subnet_subgraph.node(
                                                                                     subnet_resource_name,
@@ -2801,6 +3064,16 @@ def _generate_resource_graph_inner(
                                                                 resource_type=resource["type"],
                                                                 group=resourceGroup,
                                                                 change_category=resource.get("changeCategory"),
+                                                            )
+                                                            # Collected at the creation site, so the
+                                                            # Inspector_Index covers exactly the nodes the
+                                                            # Diagram draws: a resource dropped by the
+                                                            # Skip_Filter or the Change_Filter never reaches
+                                                            # here (Requirements 3.2, 3.4, 4.6, 4.7, 4.8).
+                                                            inspector.record_node(
+                                                                resource_name + "-" + resourceGroup,
+                                                                resource,
+                                                                resourceGroup,
                                                             )
                                                             # progress update is handled by trailing res_pbar.update(1)
                                                     _iter_elapsed = time.time() - _iter_start
@@ -3179,13 +3452,31 @@ def _generate_resource_graph_inner(
     logger.info(f"Saving all outputs to folder: {os.path.abspath(output_dir)}")
     _heartbeat.update_phase("Rendering PNG")
     logger.info(f"Saving diagram as {output_filename}.png")
-    dot.render(output_filename, format="png")
+    # The Inspector_Mode-off branch holds exactly the render call the release
+    # preceding the Inspector executes, so the headless pipeline path is
+    # byte-identical by construction rather than by measurement (Requirement 1.3).
+    if not interactive_inspector:
+        dot.render(output_filename, format="png")
+    else:
+        render_with_interaction_layer(dot, output_filename)
 
     # Change_Summary sidecar, written beside the PNG so it shares the output
     # folder and the timestamp of the diagram (Requirement 7.5). Only reached in
     # Plan_Diff_Mode, since `run_change_summary` stays None otherwise.
     if run_change_summary is not None:
         write_change_summary_sidecar(run_change_summary, output_filename)
+
+    # Inspector_Payload, written beside the Change_Summary sidecar and derived
+    # from the same extension-less diagram path, so both land in the run's output
+    # folder (Requirements 3.6, 12.8). `build_payload` already guards each record
+    # individually; this wrapper is the outer net that keeps a failure of the
+    # whole payload a warning, so the run still returns the PNG path
+    # (Requirements 1.9, 1.11).
+    if interactive_inspector:
+        try:
+            write_inspector_payload(inspector.build_payload(), output_filename)
+        except Exception as error:  # noqa: BLE001 - the payload is optional, the PNG is not
+            logger.warning(f"Could not write the Inspector payload: {type(error).__name__}: {error}")
 
     # Export to Draw.io XML format if requested
     if exportDrawio:

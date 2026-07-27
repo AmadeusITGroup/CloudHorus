@@ -77,12 +77,15 @@ class GraphGeneratorService(BaseService):
         terraform_root_dirs: Optional[List[str]] = None,
         terraform_var_files: Optional[List[str]] = None,
         change_types: Optional[List[str]] = None,
+        interactive_inspector: bool = False,
     ) -> Optional[str]:
         """Generate Azure resource graph - delegates to original logic.
 
         Args:
             change_types: Terraform plan Change_Categories to display.
                 None means every category, which is the legacy behaviour.
+            interactive_inspector: Enables Inspector_Mode for the run.
+                False is the legacy behaviour.
         """
         # Import here to avoid circular dependency
         from core.graph_generator import generate_resource_graph
@@ -100,9 +103,16 @@ class GraphGeneratorService(BaseService):
         # `change_types` is forwarded only when it is set, so a legacy call produces
         # exactly the same argument list as before this feature. This also keeps the
         # service working while `generate_resource_graph` gains the parameter.
-        change_type_kwargs: Dict[str, Any] = {}
+        optional_kwargs: Dict[str, Any] = {}
         if change_types is not None:
-            change_type_kwargs["change_types"] = change_types
+            optional_kwargs["change_types"] = change_types
+
+        # Same discipline for `interactive_inspector`: forwarded only when the
+        # Operator enabled Inspector_Mode, so a legacy call keeps exactly the
+        # pre-feature argument list that `generate_resource_graph` accepted
+        # before the parameter existed.
+        if interactive_inspector:
+            optional_kwargs["interactive_inspector"] = True
 
         # Call the original function with exact same parameters
         png_path = generate_resource_graph(
@@ -128,7 +138,7 @@ class GraphGeneratorService(BaseService):
             terraform_json_files=terraform_json_files,
             terraform_root_dirs=terraform_root_dirs,
             terraform_var_files=terraform_var_files,
-            **change_type_kwargs,
+            **optional_kwargs,
         )
 
         # Return the actual PNG path from the generator

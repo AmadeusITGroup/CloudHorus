@@ -32,6 +32,28 @@ _REFERENCE_PATTERN = re.compile(r"\$\{([^}]+)\}")
 _SENSITIVE_PLACEHOLDER = "(sensitive)"
 _SENSITIVE_PHASES = ("before", "after")
 
+# Keys of a Renderer_Template / plan resource entry that carry identity or wiring rather than
+# configuration, excluded from the Requirement 10.4 fallback Config_Snapshot.
+_INSPECTOR_IDENTITY_KEYS = frozenset(
+    {
+        "address",
+        "changeCategory",
+        "change_category",
+        "dependsOn",
+        "depends_on",
+        "index",
+        "inspectorValues",
+        "mode",
+        "name",
+        "properties",
+        "provider_name",
+        "schema_version",
+        "sensitive_values",
+        "type",
+        "values",
+    }
+)
+
 _TERRAFORM_TO_RENDERER_TYPE = {
     "azurerm_api_management": "Microsoft.ApiManagement/service",
     "azurerm_application_gateway": "Microsoft.Network/applicationGateways",
@@ -110,6 +132,7 @@ class TerraformTemplateBuilder:
         self,
         terraform_json: Dict[str, Any],
         change_model: Optional[ChangeModel] = None,
+        collect_inspector_values: bool = False,
     ) -> LocalTemplateDocument:
         """Build a normalized local template document from Terraform JSON.
 
@@ -118,6 +141,11 @@ class TerraformTemplateBuilder:
         is supplied (Plan_Diff_Mode), the document additionally carries the resources the plan
         destroys, redacted sensitive leaves, a `change_category` per resource and the change
         metadata (Requirements 3.3, 3.5, 4.1, 4.4, 10.1).
+
+        `collect_inspector_values` is trailing and defaulted to `False`, which is Inspector_Mode
+        off: :meth:`_inspector_values_for` is never called and every resource's
+        `inspector_values` stays `None`, so the Renderer_Template holds exactly the keys the
+        release preceding this feature produces (Requirements 1.5, 10.1).
         """
         values_root = terraform_json.get("planned_values") or terraform_json.get("values") or {}
         root_module = values_root.get("root_module", {})
@@ -142,7 +170,25 @@ class TerraformTemplateBuilder:
         if change_model is not None:
             self._apply_change_model(document, change_model)
 
+        if collect_inspector_values:
+            self._attach_inspector_values(document, terraform_json)
+
         return document
+
+    def _attach_inspector_values(
+        self, document: LocalTemplateDocument, terraform_json: Dict[str, Any]
+    ) -> None:
+        """Attach the redacted inspector triple to every resource of the document.
+
+        Called only when Inspector_Mode is enabled, and only after `_apply_change_model` has
+        assigned the Change_Categories, so each resource resolves its phases through the
+        category table (Requirement 6). A resource the helper cannot describe keeps
+        `inspector_values` at `None` (Requirements 1.5, 10.1).
+        """
+        for resource in document.resources:
+            resource.inspector_values = self._inspector_values_for(
+                terraform_json, resource, resource.change_category
+            )
 
     def _merge_change_resources(
         self,
@@ -292,7 +338,10 @@ class TerraformTemplateBuilder:
         )
 
     def _build_plan_document(
-        self, terraform_json: Dict[str, Any], change_types: Optional[Sequence[str]] = None
+        self,
+        terraform_json: Dict[str, Any],
+        change_types: Optional[Sequence[str]] = None,
+        collect_inspector_values: bool = False,
     ) -> LocalTemplateDocument:
         """Build the document for a plan/state file, in Legacy_Mode or Plan_Diff_Mode.
 
@@ -300,16 +349,25 @@ class TerraformTemplateBuilder:
         filter, so the renderer template stays byte-identical (Requirement 8.1). An empty
         `resource_changes` array is Plan_Diff_Mode with every resource `unchanged`, reported with
         the Requirement 9.5 message.
+
+        `collect_inspector_values` is trailing and defaulted, forwarded to
+        :meth:`build_document_from_json` on both branches (Requirements 1.5, 10.1).
         """
         raw_changes = terraform_json.get("resource_changes")
         if raw_changes is None:
-            return self.build_document_from_json(terraform_json)
+            return self.build_document_from_json(
+                terraform_json, collect_inspector_values=collect_inspector_values
+            )
 
         change_model = ChangeExtractor().extract(raw_changes)
         if isinstance(raw_changes, list) and not raw_changes:
             self.logger.info("Plan contains no resource changes")
 
-        document = self.build_document_from_json(terraform_json, change_model=change_model)
+        document = self.build_document_from_json(
+            terraform_json,
+            change_model=change_model,
+            collect_inspector_values=collect_inspector_values,
+        )
         filtered = ChangeFilter(parse_change_types(change_types)).apply(document)
         return filtered if filtered is not None else document
 
@@ -318,6 +376,7 @@ class TerraformTemplateBuilder:
         terraform_json_file: str,
         output_file: Optional[str] = None,
         change_types: Optional[Sequence[str]] = None,
+        collect_inspector_values: bool = False,
     ) -> Optional[str]:
         """Convert a Terraform show-json file into the current local-template JSON contract.
 
@@ -326,10 +385,17 @@ class TerraformTemplateBuilder:
         the document is built with it and then restricted to the selected Change_Categories
         (Requirements 1.1, 1.2, 6.9). The temp-file contract and the exception guard returning
         `None` are unchanged (Requirements 9.1, 9.3).
+
+        `collect_inspector_values` follows `change_types` as the last parameter and defaults to
+        `False`: with Inspector_Mode off no `inspectorValues` key reaches the written
+        Renderer_Template, which stays key-for-key what the release preceding this feature wrote
+        (Requirements 1.5, 10.1).
         """
         try:
             terraform_json = self.load_terraform_json(terraform_json_file)
-            document = self._build_plan_document(terraform_json, change_types)
+            document = self._build_plan_document(
+                terraform_json, change_types, collect_inspector_values
+            )
             renderer_template = document.to_renderer_template()
 
             if output_file is None:
@@ -790,6 +856,189 @@ class TerraformTemplateBuilder:
         # Shape mismatch between the value tree and the mask: nothing is flagged here.
         return values
 
+    def _inspector_values_for(
+        self,
+        terraform_json: Dict[str, Any],
+        resource: Any,
+        category: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the redacted ``{before, after, afterUnknown}`` triple of one address.
+
+        The change object comes from the `changes_by_address` map that
+        :meth:`_sensitive_indexes` already builds and caches per document, so resolving a
+        resource adds no second index and no further read of the Plan_File (Requirement 6.10).
+        Every phase leaves the helper redacted, through the same
+        :meth:`_redact_sensitive` / :meth:`_sensitive_mask_for` pair the diagram uses:
+        `before_sensitive` for the before phase and `after_sensitive` with the planned
+        resource's `sensitive_values` as fallback for the after phase (Requirements 11.1, 11.2).
+
+        The Change_Category drives which phase comes from where (Requirement 6):
+
+        =============  ===========================  ==========================
+        Category       before                       after
+        =============  ===========================  ==========================
+        ``create``     ``{}``                       redacted ``change.after``
+        ``delete``     redacted ``change.before``   ``{}``
+        ``update``     redacted ``change.before``   redacted ``change.after``
+        ``replace``    redacted ``change.before``   redacted ``change.after``
+        ``unchanged``  the redacted attribute map   the same redacted map
+        no ``change``  the redacted attribute map   the same redacted map
+        =============  ===========================  ==========================
+
+        A missing `change.after` for `create`, `update` or `replace` falls back to the redacted
+        attribute map and logs the address (Requirement 6.7); a missing `change.before` for
+        `update`, `replace` or `delete` falls back to an empty before snapshot and logs the
+        address (Requirement 6.8). Both snapshots come from the redacted attribute map when the
+        resource carries no change object at all, so every Attribute_Entry lands `unchanged`
+        (Requirements 6.5, 6.9). A resource with no attribute map is described by its
+        Renderer_Template `properties` map plus its extra fields (Requirement 10.4).
+
+        `after_unknown` travels untouched: it is a boolean mask, never a value, and
+        ``diff_attributes`` consumes it to render the Unknown_Marker (Requirement 6.6). The
+        `afterUnknown` key is present only when the plan carries such a mask.
+
+        Only the address ever reaches a log record, so no flagged value can leak through a
+        warning (Requirement 11.6). Returns ``None`` for a resource this builder cannot
+        describe.
+        """
+        if resource is None:
+            return None
+
+        address = self._inspector_address(resource)
+        attribute_map = self._inspector_attribute_map(resource)
+        change = self._inspector_change_for(terraform_json, address)
+        redacted_map = self._redact_sensitive(
+            attribute_map, self._sensitive_mask_for(terraform_json, address, "after")
+        )
+
+        if category == "create":
+            before: Any = {}
+            after = self._inspector_phase_snapshot(terraform_json, address, change, "after")
+            if after is None:
+                self._warn_missing_change_phase(address, "after", category)
+                after = redacted_map
+        elif category == "delete":
+            before = self._inspector_phase_snapshot(terraform_json, address, change, "before")
+            if before is None:
+                self._warn_missing_change_phase(address, "before", category)
+                before = {}
+            after = {}
+        elif category in ("update", "replace"):
+            before = self._inspector_phase_snapshot(terraform_json, address, change, "before")
+            if before is None:
+                self._warn_missing_change_phase(address, "before", category)
+                before = {}
+            after = self._inspector_phase_snapshot(terraform_json, address, change, "after")
+            if after is None:
+                self._warn_missing_change_phase(address, "after", category)
+                after = redacted_map
+        else:
+            # `unchanged`, an unrecognized category, or no category at all: one tree on both
+            # sides, so every Attribute_Entry of the resource lands `unchanged`.
+            if change is None:
+                self.logger.warning(
+                    "Resource %s carries no plan change entry; the Inspector shows its current "
+                    "configuration on both sides",
+                    address or "<unknown address>",
+                )
+            before = redacted_map
+            after = redacted_map
+
+        inspector_values: Dict[str, Any] = {"before": before, "after": after}
+
+        after_unknown = change.get("after_unknown") if change is not None else None
+        if after_unknown is not None:
+            inspector_values["afterUnknown"] = after_unknown
+
+        return inspector_values
+
+    def _inspector_change_for(self, terraform_json: Dict[str, Any], address: str) -> Optional[Dict[str, Any]]:
+        """Return the `change` object of one address, from the cached sensitivity index."""
+        if not isinstance(terraform_json, dict) or not address:
+            return None
+        changes_by_address, _ = self._sensitive_indexes(terraform_json)
+        change = changes_by_address.get(address)
+        return change if isinstance(change, dict) else None
+
+    def _inspector_phase_snapshot(
+        self,
+        terraform_json: Dict[str, Any],
+        address: str,
+        change: Optional[Dict[str, Any]],
+        phase: str,
+    ) -> Any:
+        """Redact one phase of a change object, or return `None` when the plan omits it.
+
+        A mask that flags the whole phase (`before_sensitive: true`) leaves the
+        Redaction_Literal in place of the object rather than a map. That literal *is* the
+        Config_Snapshot — the Inspector reports a non-container snapshot at the root
+        Attribute_Path — so it is returned as it stands: falling back to the unredacted
+        `change` object here would put every flagged value into the Inspector_Payload
+        (Requirements 11.1, 11.3, 11.5).
+        """
+        if change is None:
+            return None
+        raw = change.get(phase)
+        if not isinstance(raw, dict):
+            # Absent, explicitly null, or not an object: the caller applies its fallback.
+            return None
+        return self._redact_sensitive(raw, self._sensitive_mask_for(terraform_json, address, phase))
+
+    def _warn_missing_change_phase(self, address: str, phase: str, category: Optional[str]) -> None:
+        """Log the address of a resource whose change entry omits one phase."""
+        self.logger.warning(
+            "Plan change entry for %s (%s) carries no '%s' object; the Inspector falls back to %s",
+            address or "<unknown address>",
+            category or "unknown category",
+            phase,
+            "the resource attribute map" if phase == "after" else "an empty before snapshot",
+        )
+
+    @staticmethod
+    def _inspector_address(resource: Any) -> str:
+        """The Terraform address of a normalized resource or of a raw resource dict."""
+        if isinstance(resource, LocalTemplateResource):
+            return resource.address or ""
+        if isinstance(resource, dict):
+            address = resource.get("address")
+            return address if isinstance(address, str) else ""
+        return ""
+
+    @staticmethod
+    def _inspector_attribute_map(resource: Any) -> Dict[str, Any]:
+        """The resource's attribute map, or its Renderer_Template shape as the fallback.
+
+        A resource carrying no attribute map (Legacy_Mode, or a plan entry with an empty
+        `values` object) is described by its `properties` map plus its extra fields, which is
+        the only configuration such an entry holds (Requirement 10.4).
+        """
+        if isinstance(resource, LocalTemplateResource):
+            if resource.raw_values:
+                return dict(resource.raw_values)
+            snapshot: Dict[str, Any] = {}
+            if resource.properties:
+                snapshot["properties"] = resource.properties
+            for key, value in (resource.extra_fields or {}).items():
+                if value is not None:
+                    snapshot[key] = value
+            return snapshot
+
+        if isinstance(resource, dict):
+            values = resource.get("values")
+            if isinstance(values, dict) and values:
+                return dict(values)
+            snapshot = {}
+            properties = resource.get("properties")
+            if isinstance(properties, dict) and properties:
+                snapshot["properties"] = properties
+            for key, value in resource.items():
+                if key in _INSPECTOR_IDENTITY_KEYS or value is None:
+                    continue
+                snapshot[key] = value
+            return snapshot
+
+        return {}
+
     def _reconstruct_deleted_resources(
         self, terraform_json: Dict[str, Any], change_model: Optional[ChangeModel]
     ) -> List[Dict[str, Any]]:
@@ -1231,11 +1480,14 @@ def build_terraform_template(
     terraform_json_file: str,
     output_file: Optional[str] = None,
     change_types: Optional[Sequence[str]] = None,
+    collect_inspector_values: bool = False,
 ) -> Optional[str]:
     """Convenience wrapper for Terraform JSON normalization.
 
-    The positional signature is unchanged; `change_types` is trailing and optional so existing
-    call sites stay source-compatible.
+    The positional signature is unchanged; `change_types` and `collect_inspector_values` are
+    trailing and optional so existing call sites stay source-compatible.
     """
     builder = TerraformTemplateBuilder()
-    return builder.build_terraform_template(terraform_json_file, output_file, change_types)
+    return builder.build_terraform_template(
+        terraform_json_file, output_file, change_types, collect_inspector_values
+    )

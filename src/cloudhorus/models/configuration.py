@@ -83,6 +83,9 @@ class VisualizationConfig:
     # Terraform plan diff: Change_Categories to display (None = every category)
     change_types: Optional[List[str]] = None
 
+    # Interactive resource inspector: Inspector_Mode, off by default
+    interactive_inspector: bool = False
+
     def __post_init__(self):
         """Validate and initialize default values."""
         # Ensure optimizations list matches subscriptions

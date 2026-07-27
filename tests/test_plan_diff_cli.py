@@ -616,10 +616,12 @@ class TestArgparseInventory:
 
         assert {name: inventory[name] for name in LEGACY_ARGUMENTS} == LEGACY_ARGUMENTS
 
-    def test_change_types_is_the_only_added_argument(self):
+    def test_only_declared_arguments_were_added(self):
+        # `--interactiveInspector` is the interactive-resource-inspector feature's one
+        # addition (its own spec, Requirement 2.2); every other addition must be declared here.
         inventory = _argument_inventory()
 
-        assert set(inventory) - set(LEGACY_ARGUMENTS) == {"--changeTypes"}
+        assert set(inventory) - set(LEGACY_ARGUMENTS) == {"--changeTypes", "--interactiveInspector"}
 
     def test_no_pre_existing_argument_was_removed(self):
         assert set(LEGACY_ARGUMENTS) <= set(_argument_inventory())

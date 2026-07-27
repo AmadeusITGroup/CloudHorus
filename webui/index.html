@@ -375,6 +375,13 @@
               <span class="toggle-slider"></span>
             </label>
 
+            <!-- Interactive Resource Inspector (Requirement 2.4: every input mode, off by default) -->
+            <label class="toggle-row">
+              <span class="toggle-label">Interactive Inspector<span class="info-icon" data-tooltip="When enabled, CloudHorus writes an interactive layer beside the PNG so you can click a resource in the diagram and read its full configuration in a side panel. In plan diff mode each attribute the plan adds, removes or changes is marked. Available in Live, Bicep, Terraform source, Terraform plan JSON and plan diff runs."><i class="fas fa-info-circle"></i></span></span>
+              <input type="checkbox" id="chk-interactive-inspector" class="toggle-input" onchange="refreshPreview()">
+              <span class="toggle-slider"></span>
+            </label>
+
             <!-- Per-subscription arrays -->
             <div id="per-sub-options" class="per-sub-container hidden">
               <h3 class="subsection-title"><i class="fas fa-sliders-h"></i> Per-Subscription Settings</h3>
@@ -489,10 +496,89 @@
               <button class="btn btn-icon btn-sm" onclick="zoomOut()" title="Zoom out"><i class="fas fa-search-minus"></i></button>
               <button class="btn btn-icon btn-sm" onclick="zoomReset()" title="Fit"><i class="fas fa-expand"></i></button>
               <button class="btn btn-icon btn-sm" onclick="openExternal()" title="Open in viewer"><i class="fas fa-external-link-alt"></i></button>
+              <!-- Interaction_Layer / PNG switch (Requirement 8.8) — shown once a layer is inlined -->
+              <button class="btn btn-icon btn-sm hidden" id="viewer-layer-toggle" onclick="toggleViewerLayer()"
+                      title="Switch between the interactive layer and the image" aria-pressed="true">
+                <i class="fas fa-vector-square"></i>
+              </button>
             </div>
           </div>
-          <div class="viewer-canvas" id="viewer-canvas">
-            <img id="viewer-img" src="" alt="Architecture Diagram" draggable="false">
+          <div class="viewer-body" id="viewer-body">
+            <div class="viewer-canvas" id="viewer-canvas">
+              <!-- #viewer-stage carries the pan/zoom transform and holds the PNG plus,
+                   when Inspector_Mode produced one, the inlined Interaction_Layer SVG -->
+              <div class="viewer-stage" id="viewer-stage">
+                <img id="viewer-img" src="" alt="Architecture Diagram" draggable="false">
+              </div>
+            </div>
+
+            <!-- ─── INSPECTOR PANEL (Requirements 5.5, 5.9-5.12, 7.12, 8.8, 12.9) ─── -->
+            <aside class="inspector-panel hidden" id="inspector-panel" role="complementary"
+                   aria-labelledby="inspector-name" tabindex="-1">
+              <div class="inspector-header">
+                <div class="inspector-identity">
+                  <div class="inspector-title-row">
+                    <h3 class="inspector-name" id="inspector-name"></h3>
+                    <span class="inspector-category hidden" id="inspector-category"></span>
+                  </div>
+                  <dl class="inspector-meta">
+                    <div class="inspector-meta-item">
+                      <dt>Type</dt><dd id="inspector-type"></dd>
+                    </div>
+                    <div class="inspector-meta-item">
+                      <dt>Resource group</dt><dd id="inspector-resource-group"></dd>
+                    </div>
+                    <div class="inspector-meta-item inspector-meta-address" id="inspector-address-row">
+                      <dt>Address</dt><dd id="inspector-address"></dd>
+                    </div>
+                  </dl>
+                </div>
+                <button class="btn btn-icon btn-sm inspector-close" id="inspector-close"
+                        onclick="closeInspectorPanel()" title="Close inspector" aria-label="Close inspector">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+
+              <!-- Attribute_State legend, populated from the Inspector_Index style table -->
+              <div class="inspector-legend hidden" id="inspector-legend" role="list" aria-label="Attribute state legend"></div>
+
+              <div class="inspector-controls">
+                <div class="input-wrapper inspector-filter-wrapper">
+                  <i class="fas fa-search input-icon"></i>
+                  <input type="text" id="inspector-filter" class="form-input" placeholder="Filter attributes"
+                         spellcheck="false" autocomplete="off" aria-label="Filter attributes"
+                         oninput="applyInspectorFilters()">
+                </div>
+                <label class="inspector-toggle">
+                  <input type="checkbox" id="chk-inspector-changed-only" class="toggle-input" onchange="applyInspectorFilters()">
+                  <span class="toggle-slider"></span>
+                  <span class="toggle-label">Changed only</span>
+                </label>
+                <button class="btn btn-icon btn-sm" id="inspector-copy" onclick="copyInspectorConfiguration()"
+                        title="Copy configuration" aria-label="Copy configuration">
+                  <i class="fas fa-copy"></i>
+                </button>
+              </div>
+
+              <div class="inspector-counts" id="inspector-counts" role="status" aria-live="polite"></div>
+              <div class="inspector-status" id="inspector-status" role="status" aria-live="polite"></div>
+
+              <div class="inspector-table-scroll" id="inspector-table-scroll">
+                <table class="inspector-table" id="inspector-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" class="inspector-col-flag">Flag</th>
+                      <th scope="col" class="inspector-col-path">Attribute</th>
+                      <th scope="col" class="inspector-col-value">Before</th>
+                      <th scope="col" class="inspector-col-value">After</th>
+                    </tr>
+                  </thead>
+                  <tbody id="inspector-rows"></tbody>
+                </table>
+              </div>
+
+              <p class="inspector-truncation hidden" id="inspector-truncation"></p>
+            </aside>
           </div>
         </section>
       </div>

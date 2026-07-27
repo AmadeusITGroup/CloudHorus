@@ -162,11 +162,15 @@ def run_terraform_json_generation(
     pass_change_types: bool = True,
     pe_optimization: bool = True,
     work_dir: Optional[str] = None,
+    interactive_inspector: Optional[bool] = None,
 ) -> Tuple[str, DotAnalyzer, List[Dict[str, Any]]]:
     """Run `generate_resource_graph` in terraform-json mode against fixed templates.
 
     Returns the DOT source, a `DotAnalyzer` over it, and the list of recorded
     `build_terraform_template` calls (`{"path": ..., "kwargs": ...}`).
+
+    `interactive_inspector` is passed to `generate_resource_graph` only when it is
+    not `None`, so the default run keeps the pre-Inspector argument list.
     """
     work_dir = work_dir or tempfile.mkdtemp(prefix="cloudhorus_plan_diff_")
     os.makedirs(work_dir, exist_ok=True)
@@ -205,6 +209,8 @@ def run_terraform_json_generation(
     kwargs: Dict[str, Any] = {}
     if pass_change_types:
         kwargs["change_types"] = change_types
+    if interactive_inspector is not None:
+        kwargs["interactive_inspector"] = interactive_inspector
 
     with (
         patch("core.graph_generator.build_terraform_template", side_effect=fake_build),

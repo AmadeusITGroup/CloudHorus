@@ -70,6 +70,7 @@ crash.log
 test-data/
 
 # Root-level scratch/debug files (never commit)
+/nul
 /debug_*.py
 /reproduce_*.py
 /demonstrate_*.py
@@ -81,6 +82,9 @@ test-data/
 /_*.py
 /_*.sh
 /_*.log
+
+# Kiro local tool state (generated specId, not source)
+.kiro/specs/**/.config.kiro
 
 # Pytest cache
 .pytest_cache/

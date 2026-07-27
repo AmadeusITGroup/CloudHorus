@@ -39,10 +39,11 @@ class TestFieldShape:
         )
         assert resource.change_category is None
 
-    def test_change_category_is_the_last_field(self):
+    def test_change_category_trails_every_pre_plan_diff_field(self):
         from dataclasses import fields
 
-        assert [f.name for f in fields(LocalTemplateResource)][-1] == "change_category"
+        names = [f.name for f in fields(LocalTemplateResource)]
+        assert names.index("change_category") == names.index("raw_values") + 1
 
 
 class TestKeyOmission:

@@ -252,6 +252,14 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--interactiveInspector",
+        type=str,
+        default="False",
+        help="Produce the interactive SVG layer and the per-resource configuration payload "
+        "beside the PNG diagram (True/False). The PNG is unchanged either way.",
+    )
+
+    parser.add_argument(
         "--authMethod",
         type=str,
         choices=["device-code", "service-principal", "environment"],
@@ -412,6 +420,17 @@ def main() -> None:
     else:
         discoverResourceGroups = args.discoverResourceGroups  # specific RGs
     exportDrawio = str_to_bool(args.exportDrawio)
+
+    # Inspector_Mode: validated strictly, unlike --exportDrawio's lenient `str_to_bool`,
+    # so a typo never silently disables the Inspector (Requirement 2.3). The check runs
+    # before any generation work starts.
+    interactive_inspector_raw = str(args.interactiveInspector)
+    if interactive_inspector_raw.lower() not in ("true", "false"):
+        logger.error(
+            f"Invalid --interactiveInspector value '{interactive_inspector_raw}'. Accepted values: True False"
+        )
+        exit(1)
+    interactive_inspector = interactive_inspector_raw.lower() == "true"
 
     # Auto-detect Template mode
     has_bicep_input = bool(args.bicepFiles)
@@ -677,6 +696,7 @@ def main() -> None:
         terraform_var_files=args.terraformVarFiles if local_template_mode == "terraform-source" else None,
         scope_metadata_files=args.scopeMetadataFiles if use_local_template else None,
         change_types=change_types,
+        interactive_inspector=interactive_inspector,
     )
 
     # Initialize services with dependency injection
@@ -760,6 +780,7 @@ def main() -> None:
         terraform_root_dirs=config.terraform_root_dirs,
         terraform_var_files=config.terraform_var_files,
         change_types=config.change_types,
+        interactive_inspector=config.interactive_inspector,
     )
 
     if png_path is None:

@@ -9,6 +9,7 @@ Replaces the legacy Tkinter interface with HTML/CSS/JS powered UI.
 
 import glob
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -72,6 +73,74 @@ def _change_summary_suffix() -> str:
         return _CHANGE_SUMMARY_SUFFIX_FALLBACK
 
 
+#: Fallback suffixes of the Inspector artifacts written next to the PNG, for the
+#: same reason as ``_CHANGE_SUMMARY_SUFFIX_FALLBACK``: the GUI host process reads
+#: three small files beside the diagram and has no reason to import the render
+#: pipeline to learn their names.
+_INTERACTION_LAYER_SUFFIX_FALLBACK = ".svg"
+_INSPECTOR_RECORDS_SUFFIX_FALLBACK = ".inspector.jsonl"
+_INSPECTOR_INDEX_SUFFIX_FALLBACK = ".inspector-index.json"
+
+#: The bridge reads never raise into pywebview (Requirement 13.6), so a failure has
+#: to be reported somewhere: a corrupt Inspector_Index at warning level with its
+#: path (Requirement 13.3), an unresolvable record at debug level (Requirements
+#: 13.4, 13.5).
+_LOGGER = logging.getLogger("cloudhorus.webui")
+
+
+def _inspector_suffix(name: str, fallback: str) -> str:
+    """Return an Inspector artifact suffix, preferring the shared constant."""
+    try:
+        from core import inspector  # noqa: PLC0415
+
+        value = getattr(inspector, name, None)
+        return value if isinstance(value, str) and value else fallback
+    except Exception:
+        return fallback
+
+
+def _interaction_layer_suffix() -> str:
+    """Return the Interaction_Layer suffix (`<diagram>.svg`)."""
+    return _inspector_suffix("INTERACTION_LAYER_SUFFIX", _INTERACTION_LAYER_SUFFIX_FALLBACK)
+
+
+def _inspector_records_suffix() -> str:
+    """Return the Inspector_Record JSONL suffix (`<diagram>.inspector.jsonl`)."""
+    return _inspector_suffix("INSPECTOR_RECORDS_SUFFIX", _INSPECTOR_RECORDS_SUFFIX_FALLBACK)
+
+
+def _inspector_index_suffix() -> str:
+    """Return the Inspector_Index suffix (`<diagram>.inspector-index.json`)."""
+    return _inspector_suffix("INSPECTOR_INDEX_SUFFIX", _INSPECTOR_INDEX_SUFFIX_FALLBACK)
+
+
+def _sidecar_path(png_path: Any, suffix: str) -> Optional[str]:
+    """Derive the path of a sidecar artifact from the PNG path of a run.
+
+    The Inspector artifacts share the stem of the diagram inside the run folder,
+    exactly like the Change_Summary sidecar, so the derivation is the same
+    ``splitext`` on the PNG path.
+    """
+    if not isinstance(png_path, str) or not png_path.strip():
+        return None
+    return os.path.splitext(png_path)[0] + suffix
+
+
+def _is_within_folder(path: Any, folder: Any) -> bool:
+    """Whether *path* resolves inside *folder*, with symlinks followed on both sides.
+
+    ``realpath`` is what makes this sound: a name that sits in the run folder but
+    links out of it resolves outside and is not contained. An empty folder means
+    the current directory, matching how ``os.path.join`` reads such a path.
+    """
+    try:
+        root = os.path.realpath(folder if isinstance(folder, str) and folder else os.curdir)
+        resolved = os.path.realpath(path)
+    except (OSError, ValueError, TypeError):
+        return False
+    return resolved == root or resolved.startswith(os.path.join(root, ""))
+
+
 def normalize_change_types(change_types: Any) -> List[str]:
     """Normalize a Change_Filter selection to canonical order, dropping unknowns.
 
@@ -99,6 +168,10 @@ class CloudHorusAPI:
         self._last_auth_check: float = 0
         self._last_auth_data: Optional[Dict] = None
         self._generation_start_time: float = 0  # epoch when generation started
+        #: Inspector_Index payloads keyed by resolved index path. One activation per
+        #: element must not re-read the index (Requirement 12.1), and the index of a
+        #: run never changes once written, so a successful read is cached.
+        self._inspector_index_cache: Dict[str, Dict[str, Any]] = {}
 
     def set_window(self, window: webview.Window):
         self._window = window
@@ -470,6 +543,14 @@ class CloudHorusAPI:
         if args.get("exportDrawio"):
             cmd.extend(["--exportDrawio", "true"])
 
+        # Inspector_Mode is independent of the input mode, so the toggle marshals
+        # identically for Live, Bicep, Terraform source and plan JSON runs, and
+        # changes no other argument of the payload (Requirements 2.5, 2.8). The CLI
+        # default is `False`, so the argument stays off the line when the toggle is
+        # off.
+        if args.get("interactiveInspector"):
+            cmd.extend(["--interactiveInspector", "True"])
+
         # Per-subscription array parameters
         subnet_opt = args.get("subnetOptimization", [])
         pe_opt = args.get("peOptimization", [])
@@ -683,6 +764,192 @@ class CloudHorusAPI:
         except Exception:
             pass
         return None
+
+    # ─── Inspector_Bridge ─────────────────────────────────────────────
+
+    def get_interaction_layer(self, png_path: str) -> Optional[str]:
+        """Given a generated PNG path, return the Interaction_Layer SVG text.
+
+        The layer is `<diagram>.svg` beside the PNG and only exists for an
+        Inspector_Mode run, so a missing file is a normal outcome and returns
+        `None`: the WebUI then keeps displaying the PNG (Requirement 13.2).
+        """
+        path = _sidecar_path(png_path, _interaction_layer_suffix())
+        if path is None:
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            _LOGGER.warning("Interaction layer %s could not be read: %s", path, exc)
+            return None
+
+    def read_inspector_index(self, png_path: str) -> Optional[Dict[str, Any]]:
+        """Given a generated PNG path, read the Inspector_Index beside it.
+
+        The index is `<diagram>.inspector-index.json`; it carries the byte offset
+        map every record read seeks with, the Attribute_Style table and the applied
+        Value_Bounds. A missing file means no Inspector_Payload for that diagram
+        (Requirement 13.1); text that is not valid JSON logs the path at warning
+        level and returns `None` (Requirement 13.3). Successful reads are cached
+        per resolved path, so activating many elements of one run reads the index
+        once (Requirement 12.1).
+        """
+        path = _sidecar_path(png_path, _inspector_index_suffix())
+        if path is None:
+            return None
+        try:
+            resolved = os.path.realpath(path)
+        except (OSError, ValueError):
+            resolved = path
+        cached = self._inspector_index_cache.get(resolved)
+        if cached is not None:
+            return cached
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            return None
+        except json.JSONDecodeError as exc:
+            _LOGGER.warning("Inspector index %s is not valid JSON: %s", path, exc)
+            return None
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            _LOGGER.warning("Inspector index %s could not be read: %s", path, exc)
+            return None
+        if not isinstance(payload, dict):
+            _LOGGER.warning("Inspector index %s does not hold a JSON object", path)
+            return None
+        self._inspector_index_cache[resolved] = payload
+        return payload
+
+    def read_inspector_record(self, png_path: str, inspector_key: str) -> Optional[Dict[str, Any]]:
+        """Read exactly the one Inspector_Record of *inspector_key* (Requirement 12.1).
+
+        The index gives the byte offset and byte length of that record's line in
+        `<diagram>.inspector.jsonl`; the file is opened in binary mode, seeked to
+        the offset, and read for exactly the indexed length — never more
+        (Requirement 13.5). An unknown key (Requirement 13.4), an offset past EOF,
+        a truncated line or a line that is not one JSON object returns `None` after
+        a debug log, so a stale or damaged payload costs the panel a message rather
+        than an exception (Requirements 13.5, 13.6).
+        """
+        index = self.read_inspector_index(png_path)
+        if not isinstance(index, dict):
+            return None
+
+        keys = index.get("keys")
+        if not isinstance(keys, dict) or not isinstance(inspector_key, str):
+            _LOGGER.debug("Inspector index of %s carries no usable key map", png_path)
+            return None
+        entry = keys.get(inspector_key)
+        if not isinstance(entry, dict):
+            # Requirement 13.4: no entry, so no file read is attempted at all.
+            _LOGGER.debug("Inspector index of %s holds no entry for key %r", png_path, inspector_key)
+            return None
+
+        offset = entry.get("offset")
+        length = entry.get("length")
+        if (
+            not isinstance(offset, int)
+            or not isinstance(length, int)
+            or isinstance(offset, bool)
+            or isinstance(length, bool)
+            or offset < 0
+            or length <= 0
+        ):
+            _LOGGER.debug("Inspector index entry for key %r carries no usable location", inspector_key)
+            return None
+
+        records_path = self._inspector_records_path(png_path, index)
+        if records_path is None:
+            return None
+
+        try:
+            with open(records_path, "rb") as handle:
+                handle.seek(offset)
+                raw = handle.read(length)
+        except FileNotFoundError:
+            _LOGGER.debug("Inspector records file %s is absent", records_path)
+            return None
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            _LOGGER.debug("Inspector records file %s could not be read: %s", records_path, exc)
+            return None
+
+        if len(raw) != length:
+            # Offset past EOF, or a line the writer never finished.
+            _LOGGER.debug(
+                "Inspector record for key %r is incomplete: %d of %d bytes at offset %d",
+                inspector_key,
+                len(raw),
+                length,
+                offset,
+            )
+            return None
+
+        try:
+            record = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            _LOGGER.debug("Inspector record for key %r is not valid JSON: %s", inspector_key, exc)
+            return None
+        if not isinstance(record, dict):
+            _LOGGER.debug("Inspector record for key %r does not hold a JSON object", inspector_key)
+            return None
+        if record.get("key") != inspector_key:
+            # Requirements 12.1 and 13.5: a read is identified by the Inspector_Key,
+            # so a line whose own key is absent or names another element is an
+            # incomplete stored form of the requested record, not the record.
+            _LOGGER.debug(
+                "Inspector record at the indexed location of key %r carries key %r: ignored",
+                inspector_key,
+                record.get("key"),
+            )
+            return None
+        return record
+
+    def _inspector_records_path(self, png_path: str, index: Dict[str, Any]) -> Optional[str]:
+        """Resolve the JSONL path of an Inspector_Index, inside the diagram's own folder.
+
+        The Inspector_Index is JSON sitting next to the PNG, so its ``records``
+        entry is untrusted input: honouring an absolute path, a traversal or a
+        symlink out of the run folder would turn a record read into an
+        arbitrary-file read, since the bytes it addresses are decoded and shown in
+        the panel. The entry is therefore resolved against the run folder of the
+        diagram and rejected unless it still resolves under that folder once
+        symlinks are followed. A rejection logs the path at warning level and
+        returns ``None``, so the panel simply shows no record; nothing raises into
+        pywebview (Requirement 13.6).
+        """
+        derived = _sidecar_path(png_path, _inspector_records_suffix())
+        records = index.get("records")
+        if isinstance(records, str) and records.strip():
+            try:
+                folder = os.path.dirname(png_path)
+                # An absolute `records` wins the join, which is exactly why the
+                # containment check below, not the join, is what keeps us inside.
+                candidate = os.path.join(folder, records)
+            except (OSError, ValueError, TypeError) as exc:
+                _LOGGER.debug("Inspector index records entry %r is unusable: %s", records, exc)
+                candidate = None
+            if candidate:
+                if not _is_within_folder(candidate, folder):
+                    _LOGGER.warning(
+                        "Inspector index records entry %r resolves to %s, outside the run folder %s: ignored",
+                        records,
+                        candidate,
+                        folder or os.curdir,
+                    )
+                    return None
+                if os.path.exists(candidate) or derived is None:
+                    return candidate
+        if derived is not None and not _is_within_folder(derived, os.path.dirname(png_path)):
+            _LOGGER.warning(
+                "Inspector records file %s resolves outside the run folder: ignored",
+                derived,
+            )
+            return None
+        return derived
 
     def get_image_base64(self, file_path: str) -> Optional[str]:
         """Read an image file and return as base64 data URL for display."""

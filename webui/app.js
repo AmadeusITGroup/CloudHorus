@@ -29,6 +29,10 @@ const state = {
   terraformScopeMetadataFiles: [],
   changeTypes: [],          // selected Change_Categories ([] means every category)
   changeSummary: null,      // payload of the *.change-summary.json sidecar
+  interactiveInspector: false, // Inspector_Mode toggle, off by default (Requirement 2.4)
+  inspectorIndex: null,     // payload of the *.inspector-index.json sidecar
+  inspectorKey: null,       // Inspector_Key of the element currently in the panel
+  viewerLayer: 'png',       // which layer #viewer-stage shows: 'png' or 'svg'
   bicepSubscriptions: [],  // parsed from _cloudHorus metadata
   terraformSubscriptions: [],
   templateSubMap: [],       // maps each template index -> unique subscription index
@@ -1120,6 +1124,14 @@ function terraformRootDirsFromMainFiles(mainFiles) {
 }
 
 // ─── Build Command ───
+// Inspector_Mode lives on its own switch, independent of the input mode
+// (Requirement 2.8). Read from the DOM so the toggle is the single source of
+// truth, with the mirrored state field as the fallback.
+function inspectorToggleOn() {
+  const el = document.getElementById('chk-interactive-inspector');
+  return el ? !!el.checked : !!state.interactiveInspector;
+}
+
 function buildCommandArgs() {
   const args = {};
   args.mode = state.mode;
@@ -1161,6 +1173,11 @@ function buildCommandArgs() {
   args.privateDnsZonesOptimization = document.getElementById('chk-dns-opt').checked;
   args.rankDebug = document.getElementById('chk-rank-debug').checked;
   args.exportDrawio = document.getElementById('chk-export-drawio').checked;
+  // Inspector_Mode is marshalled outside every mode branch, so it reaches the CLI
+  // in Live, Bicep, Terraform source, Terraform JSON and Plan_Diff_Mode runs alike
+  // (Requirements 2.5, 2.8).
+  state.interactiveInspector = inspectorToggleOn();
+  args.interactiveInspector = state.interactiveInspector;
 
   // Per-subscription arrays
   if (state.mode === 'live') {
@@ -1261,6 +1278,9 @@ function buildCommandString() {
   parts.push('--rankDebug', args.rankDebug ? 'true' : 'false');
   parts.push('--privateDnsZonesOptimization', args.privateDnsZonesOptimization ? 'true' : 'false');
   if (args.exportDrawio) parts.push('--exportDrawio', 'true');
+  // Same flag the WebUI posts in args, so the preview matches the command that runs
+  // (Requirement 2.6). Absent when the toggle is off, which is the CLI default.
+  if (args.interactiveInspector) parts.push('--interactiveInspector', 'True');
 
   if (args.subnetOptimization && args.subnetOptimization.length > 0) {
     parts.push('--subnetOptimization', ...args.subnetOptimization.map(v => v ? 'true' : 'false'));
@@ -1570,8 +1590,12 @@ async function rerunWithChangeTypes() {
       setStatus('ready', 'Complete');
       if (result.file) {
         state.lastGeneratedFile = result.file;
+        // The filtered run draws a different element set, so the Inspector
+        // artifacts of the previous run go with it (Requirement 13.7)
+        clearInspector();
         await showImage(result.file);
         await loadChangeSummary(result.file, false);
+        await loadInspector(result.file);
       }
       showToast('Change type filter applied', 'success');
     } else {
@@ -1620,6 +1644,9 @@ async function generate() {
   state.lastGeneratedFile = null;
   // Chips describe the diagram on screen, so they go away with it
   clearChangeFilter();
+  // Same for the Inspector_Index, the inlined Interaction_Layer and the panel
+  // content of the previous run (Requirement 13.7)
+  clearInspector();
 
   // Hide horizontal splitter and restore console to normal
   const hSplitter = document.getElementById('h-splitter');
@@ -1659,6 +1686,10 @@ async function generate() {
         // Plan_Diff_Mode writes a Change_Summary sidecar beside the PNG; a
         // Legacy_Mode run has none and leaves the filter panel hidden.
         await loadChangeSummary(result.file, true);
+        // Inspector_Mode writes the Interaction_Layer and the Inspector_Index
+        // beside the PNG; a run without them keeps the plain PNG viewer
+        // (Requirements 13.1, 13.2).
+        await loadInspector(result.file);
       }
     } else {
       setStatus('error', 'Failed');
@@ -1782,7 +1813,10 @@ async function showImage(filePath) {
   }
 
   state.viewerZoom = 1;
-  img.style.transform = 'scale(1)';
+  // The transform lands on #viewer-stage, which wraps the PNG and, when
+  // Inspector_Mode produced one, the Interaction_Layer SVG, so both layers
+  // share one zoom factor (Requirements 3.9, 8.8).
+  applyViewerZoom();
   initPanZoom();
 
   // Scroll to viewer with slight delay to ensure image is rendered
@@ -1794,7 +1828,6 @@ async function showImage(filePath) {
 // ─── Pan & Zoom for Viewer ───
 function initPanZoom() {
   const canvas = document.getElementById('viewer-canvas');
-  const img = document.getElementById('viewer-img');
   let isPanning = false;
   let startX, startY, scrollLeft, scrollTop;
 
@@ -1823,8 +1856,11 @@ function initPanZoom() {
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     state.viewerZoom = Math.max(0.1, Math.min(5, state.viewerZoom * delta));
-    img.style.transform = `scale(${state.viewerZoom})`;
+    applyViewerZoom();
   };
+
+  // Selection is delegated on the stage, so it survives every layer swap
+  initInspectorInteractions();
 }
 
 function openExternal() {
@@ -1835,17 +1871,24 @@ function openExternal() {
 }
 
 // ─── Viewer Zoom ───
+// Written to #viewer-stage rather than #viewer-img: the stage wraps whichever
+// layer is active, so the PNG behaviour is unchanged and the zoom factor
+// survives a switch to the Interaction_Layer (Requirement 8.8).
+function applyViewerZoom() {
+  const target = document.getElementById('viewer-stage') || document.getElementById('viewer-img');
+  if (target) target.style.transform = `scale(${state.viewerZoom})`;
+}
 function zoomIn() {
   state.viewerZoom = Math.min(state.viewerZoom * 1.25, 5);
-  document.getElementById('viewer-img').style.transform = `scale(${state.viewerZoom})`;
+  applyViewerZoom();
 }
 function zoomOut() {
   state.viewerZoom = Math.max(state.viewerZoom * 0.8, 0.1);
-  document.getElementById('viewer-img').style.transform = `scale(${state.viewerZoom})`;
+  applyViewerZoom();
 }
 function zoomReset() {
   state.viewerZoom = 1;
-  document.getElementById('viewer-img').style.transform = 'scale(1)';
+  applyViewerZoom();
 }
 
 // ─── Fullscreen Viewer ───
@@ -1872,9 +1915,12 @@ function toggleFullscreen() {
   }
 }
 
-// Also support Escape key to exit in-app fullscreen
+// Also support Escape key to exit in-app fullscreen. An open Inspector_Panel
+// claims Escape first (Requirement 8.4), so one press never both closes the
+// panel and leaves fullscreen.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (isInspectorPanelOpen()) return;
     const app = document.getElementById('app');
     if (app && app.classList.contains('viewer-fullscreen')) {
       toggleFullscreen();
@@ -2906,4 +2952,854 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
   return div.innerHTML;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interactive Resource Inspector
+//
+// Three concerns live here:
+//   1. the Interaction_Layer: fetch, sanitise, inline, hit targets, layer switch;
+//   2. selection and panel lifecycle: activation, loading, close, focus return;
+//   3. rendering one Inspector_Record into the panel.
+//
+// Security posture: the Interaction_Layer SVG and every value of an
+// Inspector_Record are treated as untrusted data, never as markup
+// (Requirement 13.12). The SVG is parsed into a detached document, stripped of
+// <script> elements, on* handlers and script-bearing URLs, and moved in through
+// document.importNode — never innerHTML. Panel content is built with
+// createElement plus textContent, so no payload value is ever concatenated into
+// markup, and no payload value is ever written into an attribute. Colour tokens
+// come from the Inspector_Index (Requirement 7.13) and are accepted only when
+// they match a hex literal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// Attribute_State set, mirroring core.inspector.ATTRIBUTE_STATES. The colour
+// tokens and the Attribute_Flag_Tokens deliberately live only in the
+// Inspector_Index, so the front end holds no second copy of them
+// (Requirement 7.13).
+const ATTRIBUTE_STATES = ['added', 'removed', 'changed', 'unchanged'];
+const ATTRIBUTE_UNCHANGED = 'unchanged';
+
+const INSPECTOR_NO_RECORD_MESSAGE = 'No configuration available for this resource';
+const INSPECTOR_REDACTED_MESSAGE = 'Redacted attributes cannot be compared';
+const INSPECTOR_LOADING_MESSAGE = 'Loading configuration…';
+// Redaction_Literal written upstream by TerraformTemplateBuilder._redact_sensitive.
+// The panel only ever compares against it; it never unmasks anything.
+const REDACTION_LITERAL = '(sensitive)';
+
+// Element that opened the panel, so Escape and the close control can hand focus
+// back to it (Requirement 8.4).
+let inspectorOpener = null;
+// Rendered rows of the record on screen: { element, state, haystack, text }.
+let inspectorRowIndex = [];
+// Guards the delegated stage listeners against a second registration.
+let inspectorStageBound = false;
+
+// ─── Small DOM helpers, written for both the browser and the test stub ───
+
+function elementChildren(el) {
+  return el && el.children ? Array.prototype.slice.call(el.children) : [];
+}
+
+// Attribute names of an element: a NamedNodeMap in the browser, a plain map in
+// the stub DOM of the harness.
+function attributeNames(el) {
+  const attrs = el ? el.attributes : null;
+  if (!attrs) return [];
+  if (typeof attrs.length === 'number') {
+    const names = [];
+    for (let i = 0; i < attrs.length; i += 1) {
+      if (attrs[i] && attrs[i].name) names.push(attrs[i].name);
+    }
+    return names;
+  }
+  return Object.keys(attrs);
+}
+
+function clearChildren(el) {
+  if (!el) return;
+  if (typeof el.replaceChildren === 'function') el.replaceChildren();
+  else el.innerHTML = '';
+  el.innerHTML = '';
+}
+
+// Text-only write: the value lands as a text node, never as markup.
+function setElementText(el, text) {
+  if (!el) return;
+  clearChildren(el);
+  el.textContent = text === undefined || text === null ? '' : String(text);
+}
+
+function setInspectorText(id, text) {
+  setElementText(document.getElementById(id), text);
+}
+
+// Text always enters through a text node, never through innerHTML.
+function makeElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined && text !== null && text !== '') {
+    el.appendChild(document.createTextNode(String(text)));
+  }
+  return el;
+}
+
+// querySelector on the stub falls back to a placeholder element, so descendant
+// lookups that must be able to fail go through querySelectorAll.
+function firstMatch(root, selector) {
+  if (!root || typeof root.querySelectorAll !== 'function') return null;
+  const found = root.querySelectorAll(selector);
+  return found && found.length ? found[0] : null;
+}
+
+// A colour token only ever reaches CSS after matching a hex literal, so a
+// payload string can neither break out of a style declaration nor smuggle a url().
+function safeColorToken(value) {
+  return typeof value === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(value.trim()) ? value.trim() : null;
+}
+
+// Same discipline for a token used as part of a class name.
+function safeClassToken(value) {
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]*$/.test(value) ? value : null;
+}
+
+// ─── 1. Interaction_Layer ────────────────────────────────────────────────
+
+function viewerStage() {
+  return document.getElementById('viewer-stage');
+}
+
+function interactionLayerRoot() {
+  return firstMatch(viewerStage(), 'svg');
+}
+
+// Strip everything executable out of a parsed SVG before it is imported:
+// <script> elements, every on* handler, and any href carrying a script URL.
+function sanitizeInteractionLayer(root) {
+  if (!root) return root;
+  for (const child of elementChildren(root)) {
+    const tag = String(child.tagName || '').toLowerCase();
+    if (tag === 'script' || tag === 'foreignobject') {
+      if (typeof child.remove === 'function') child.remove();
+      else if (root.removeChild) root.removeChild(child);
+      continue;
+    }
+    sanitizeInteractionLayer(child);
+  }
+  for (const name of attributeNames(root)) {
+    const lowered = name.toLowerCase();
+    if (lowered.indexOf('on') === 0) {
+      root.removeAttribute(name);
+      continue;
+    }
+    if (lowered === 'href' || lowered === 'xlink:href') {
+      const value = String(root.getAttribute(name) || '').replace(/[\s\u0000-\u001f]/g, '').toLowerCase();
+      if (value.indexOf('javascript:') === 0 || value.indexOf('data:text/html') === 0) {
+        root.removeAttribute(name);
+      }
+    }
+  }
+  return root;
+}
+
+// Accessible name of an activatable element: the label the diagram draws for it.
+// The <title> carries the Inspector_Key, so it is excluded from the name.
+function elementDisplayName(el) {
+  if (!el || typeof el.querySelectorAll !== 'function') return '';
+  const texts = el.querySelectorAll('text');
+  const label = Array.prototype.map
+    .call(texts, t => String((t && t.textContent) || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  return label || inspectorKeyFromElement(el);
+}
+
+// One transparent hit rect per node group plus the keyboard and assistive
+// technology contract on every activatable element (Requirements 8.3, 8.9).
+// A cluster needs no rect: its <polygon> is already filled and painted before
+// the nodes it contains, so a node always wins the hit test (Requirements 9.2-9.4, 9.8).
+function attachHitTargets(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return 0;
+  const groups = root.querySelectorAll('g.node, g.cluster');
+  let rects = 0;
+  Array.prototype.forEach.call(groups, group => {
+    group.setAttribute('tabindex', '0');
+    group.setAttribute('role', 'button');
+    const name = elementDisplayName(group);
+    if (name) group.setAttribute('aria-label', name);
+
+    if (!group.classList || !group.classList.contains('node')) return;
+
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('class', 'ch-hit');
+    rect.setAttribute('fill', 'transparent');
+    rect.setAttribute('pointer-events', 'all');
+    let box = null;
+    try {
+      box = typeof group.getBBox === 'function' ? group.getBBox() : null;
+    } catch (_) {
+      box = null;
+    }
+    if (box) {
+      rect.setAttribute('x', box.x);
+      rect.setAttribute('y', box.y);
+      rect.setAttribute('width', box.width);
+      rect.setAttribute('height', box.height);
+    }
+    if (typeof group.prepend === 'function') group.prepend(rect);
+    else group.insertBefore(rect, group.firstChild || null);
+    rects += 1;
+  });
+  return rects;
+}
+
+// The PNG is the only layer: hide the switch and leave today's viewer behaviour
+// untouched (Requirements 13.1, 13.2).
+function fallBackToImageLayer() {
+  const stage = viewerStage();
+  state.viewerLayer = 'png';
+  if (stage) {
+    stage.classList.remove('layer-active');
+    stage.classList.add('image-active');
+  }
+  const toggle = document.getElementById('viewer-layer-toggle');
+  if (toggle) {
+    toggle.classList.add('hidden');
+    toggle.setAttribute('aria-pressed', 'false');
+  }
+}
+
+function removeInteractionLayer() {
+  const stage = viewerStage();
+  if (stage) {
+    for (const child of elementChildren(stage)) {
+      if (String(child.tagName || '').toLowerCase() !== 'svg') continue;
+      if (typeof child.remove === 'function') child.remove();
+      else stage.removeChild(child);
+    }
+  }
+  fallBackToImageLayer();
+}
+
+// Read the Interaction_Layer of a diagram, sanitise it, and inline it beside the
+// PNG under the shared stage transform. Returns true when a layer is displayed.
+async function showInteractionLayer(pngPath) {
+  const stage = viewerStage();
+  const a = api();
+  if (!stage || !a || !a.get_interaction_layer || !pngPath) {
+    fallBackToImageLayer();
+    return false;
+  }
+
+  let text = null;
+  try {
+    text = await a.get_interaction_layer(pngPath);
+  } catch (e) {
+    text = null;
+  }
+  if (!text) {
+    fallBackToImageLayer();
+    return false;
+  }
+
+  let parsed = null;
+  try {
+    parsed = new DOMParser().parseFromString(String(text), 'image/svg+xml');
+  } catch (e) {
+    parsed = null;
+  }
+  const failed = parsed ? parsed.querySelectorAll('parsererror') : null;
+  if (!parsed || (failed && failed.length)) {
+    appendConsole('[CloudHorus] Interaction layer is not well-formed XML; showing the image instead', 'warning');
+    fallBackToImageLayer();
+    return false;
+  }
+
+  const root = parsed.documentElement;
+  if (!root || String(root.tagName || '').toLowerCase() !== 'svg') {
+    fallBackToImageLayer();
+    return false;
+  }
+
+  sanitizeInteractionLayer(root);
+  removeInteractionLayer();
+  const imported = document.importNode(root, true);
+  sanitizeInteractionLayer(imported);
+  stage.appendChild(imported);
+  attachHitTargets(imported);
+
+  state.viewerLayer = 'svg';
+  stage.classList.remove('image-active');
+  stage.classList.add('layer-active');
+  const toggle = document.getElementById('viewer-layer-toggle');
+  if (toggle) {
+    toggle.classList.remove('hidden');
+    toggle.setAttribute('aria-pressed', 'true');
+  }
+  applyViewerZoom();
+  initInspectorInteractions();
+  return true;
+}
+
+// Switch the viewer between the Interaction_Layer and the PNG. The transform
+// lives on the stage, so the zoom factor is carried across untouched
+// (Requirement 8.8).
+function toggleViewerLayer() {
+  const stage = viewerStage();
+  if (!stage) return state.viewerLayer;
+  const hasLayer = !!interactionLayerRoot();
+  if (!hasLayer) {
+    fallBackToImageLayer();
+    return state.viewerLayer;
+  }
+  const toggle = document.getElementById('viewer-layer-toggle');
+  if (state.viewerLayer === 'svg') {
+    state.viewerLayer = 'png';
+    stage.classList.remove('layer-active');
+    stage.classList.add('image-active');
+    if (toggle) toggle.setAttribute('aria-pressed', 'false');
+  } else {
+    state.viewerLayer = 'svg';
+    stage.classList.remove('image-active');
+    stage.classList.add('layer-active');
+    if (toggle) toggle.setAttribute('aria-pressed', 'true');
+  }
+  applyViewerZoom();
+  return state.viewerLayer;
+}
+
+// Read the Inspector_Index and inline the Interaction_Layer of a finished run.
+async function loadInspector(pngPath) {
+  const a = api();
+  if (!a || !pngPath) {
+    fallBackToImageLayer();
+    return null;
+  }
+  if (a.read_inspector_index) {
+    try {
+      state.inspectorIndex = await a.read_inspector_index(pngPath);
+    } catch (e) {
+      state.inspectorIndex = null;
+    }
+  }
+  await showInteractionLayer(pngPath);
+  return state.inspectorIndex;
+}
+
+// ─── 2. Selection and panel lifecycle ────────────────────────────────────
+
+function inspectorPanel() {
+  return document.getElementById('inspector-panel');
+}
+
+function isInspectorPanelOpen() {
+  const panel = inspectorPanel();
+  return !!panel && !panel.classList.contains('hidden');
+}
+
+// The Inspector_Key of an activatable element is its <title>, which is what
+// Graphviz writes for a node name and a cluster name alike.
+function inspectorKeyFromElement(el) {
+  const title = firstMatch(el, 'title');
+  return title ? String(title.textContent || '').trim() : '';
+}
+
+function activatableFrom(target) {
+  if (!target || typeof target.closest !== 'function') return null;
+  return target.closest('g.node, g.cluster');
+}
+
+// A stroke change on the activated element, so the selection is not signalled by
+// colour alone (Requirement 8.7).
+function markInspectorSelection(el) {
+  const root = interactionLayerRoot();
+  if (root && typeof root.querySelectorAll === 'function') {
+    Array.prototype.forEach.call(root.querySelectorAll('.ch-selected'), previous => {
+      previous.classList.remove('ch-selected');
+    });
+  }
+  if (el && el.classList) el.classList.add('ch-selected');
+}
+
+function initInspectorInteractions() {
+  const stage = viewerStage();
+  if (!stage || inspectorStageBound) return;
+  inspectorStageBound = true;
+  stage.addEventListener('click', handleStageActivation);
+  stage.addEventListener('keydown', handleStageKeydown);
+}
+
+// One delegated click listener for the whole stage, so it keeps working after
+// every layer swap (Requirement 8.1).
+function handleStageActivation(event) {
+  const el = activatableFrom(event && event.target);
+  if (!el) return null;
+  return openInspectorForElement(el);
+}
+
+// Enter and Space open the panel for the focused element (Requirement 8.2).
+function handleStageKeydown(event) {
+  if (!event) return null;
+  const key = event.key;
+  if (key !== 'Enter' && key !== ' ' && key !== 'Spacebar') return null;
+  const el = activatableFrom(event.target);
+  if (!el) return null;
+  if (typeof event.preventDefault === 'function') event.preventDefault();
+  return openInspectorForElement(el);
+}
+
+// A second activation replaces the displayed record (Requirement 8.5).
+function openInspectorForElement(el) {
+  const key = inspectorKeyFromElement(el);
+  if (!key) return null;
+  markInspectorSelection(el);
+  inspectorOpener = el;
+  return openInspectorForKey(key);
+}
+
+// Load and display one Inspector_Record. The loading indicator stays up until
+// the bridge answers (Requirement 8.10); a key with no record shows the
+// documented message (Requirements 8.11, 13.5).
+async function openInspectorForKey(key) {
+  const panel = inspectorPanel();
+  if (panel) panel.classList.remove('hidden');
+  state.inspectorKey = key;
+  resetInspectorPanelContent();
+  setInspectorText('inspector-name', key);
+  setInspectorText('inspector-status', INSPECTOR_LOADING_MESSAGE);
+
+  const a = api();
+  if (!a || !a.read_inspector_record) {
+    renderInspectorMissing(key);
+    return null;
+  }
+
+  let record = null;
+  try {
+    record = await a.read_inspector_record(state.lastGeneratedFile, key);
+  } catch (e) {
+    record = null;
+  }
+  // A later activation already won the panel
+  if (state.inspectorKey !== key) return null;
+  if (!record) {
+    renderInspectorMissing(key);
+    return null;
+  }
+  renderInspectorRecord(record);
+  return record;
+}
+
+function renderInspectorMissing(key) {
+  resetInspectorPanelContent();
+  setInspectorText('inspector-name', key || '');
+  setInspectorText('inspector-status', INSPECTOR_NO_RECORD_MESSAGE);
+}
+
+// Escape and the close control hide the panel and hand focus back to the
+// element that opened it (Requirement 8.4).
+function closeInspectorPanel() {
+  const panel = inspectorPanel();
+  if (panel) panel.classList.add('hidden');
+  state.inspectorKey = null;
+  const root = interactionLayerRoot();
+  if (root && typeof root.querySelectorAll === 'function') {
+    Array.prototype.forEach.call(root.querySelectorAll('.ch-selected'), el => {
+      el.classList.remove('ch-selected');
+    });
+  }
+  const opener = inspectorOpener;
+  inspectorOpener = null;
+  if (opener && typeof opener.focus === 'function') opener.focus();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e && e.key === 'Escape' && isInspectorPanelOpen()) closeInspectorPanel();
+});
+
+// Empty the panel without hiding it, which is what a new activation and a new
+// run both start from.
+function resetInspectorPanelContent() {
+  inspectorRowIndex = [];
+  setInspectorText('inspector-name', '');
+  setInspectorText('inspector-type', '');
+  setInspectorText('inspector-resource-group', '');
+  setInspectorText('inspector-address', '');
+  setInspectorText('inspector-counts', '');
+  setInspectorText('inspector-status', '');
+  const addressRow = document.getElementById('inspector-address-row');
+  if (addressRow) addressRow.classList.add('hidden');
+  const badge = document.getElementById('inspector-category');
+  if (badge) {
+    clearChildren(badge);
+    badge.className = 'inspector-category hidden';
+  }
+  const legend = document.getElementById('inspector-legend');
+  if (legend) {
+    clearChildren(legend);
+    legend.classList.add('hidden');
+  }
+  clearChildren(document.getElementById('inspector-rows'));
+  const truncation = document.getElementById('inspector-truncation');
+  if (truncation) {
+    setElementText(truncation, '');
+    truncation.classList.add('hidden');
+  }
+}
+
+// Clear every Inspector artifact of the previous run (Requirement 13.7).
+function clearInspector() {
+  state.inspectorIndex = null;
+  state.inspectorKey = null;
+  inspectorOpener = null;
+  removeInteractionLayer();
+  resetInspectorPanelContent();
+  const panel = inspectorPanel();
+  if (panel) panel.classList.add('hidden');
+  const filter = document.getElementById('inspector-filter');
+  if (filter) filter.value = '';
+  const changedOnly = document.getElementById('chk-inspector-changed-only');
+  if (changedOnly) changedOnly.checked = false;
+}
+
+// ─── 3. Rendering one Inspector_Record ───────────────────────────────────
+
+// Attribute_Style of a state, read from the Inspector_Index the run wrote
+// (Requirement 7.13). `unchanged` carries no style by definition, and an index
+// that is absent leaves the stylesheet defaults in place rather than reviving a
+// second copy of the colour constants in JS.
+function attributeStyleFor(attributeState) {
+  const styles = (state.inspectorIndex && state.inspectorIndex.attributeStyles) || null;
+  if (!styles || !Object.prototype.hasOwnProperty.call(styles, attributeState)) return null;
+  const style = styles[attributeState];
+  return style && typeof style === 'object' ? style : null;
+}
+
+function attributeStateLabel(attributeState) {
+  const style = attributeStyleFor(attributeState);
+  if (style && style.label) return String(style.label);
+  return attributeState.charAt(0).toUpperCase() + attributeState.slice(1);
+}
+
+// An Attribute_State outside the set is displayed with the `unchanged`
+// presentation and reported at warning level (Requirement 13.8).
+function normalizeAttributeState(rawState) {
+  const value = rawState === undefined || rawState === null ? '' : String(rawState);
+  if (ATTRIBUTE_STATES.indexOf(value) !== -1) return value;
+  const reported = value === '' ? '(empty)' : value;
+  if (typeof console !== 'undefined' && console.warn) {
+    console.warn('Unknown attribute state, displayed as unchanged: ' + reported);
+  }
+  appendConsole('[CloudHorus] Unknown attribute state "' + reported + '" displayed as unchanged', 'warning');
+  return ATTRIBUTE_UNCHANGED;
+}
+
+// Push the Attribute_Style colour tokens of the index onto the panel, so the
+// row and legend colours come from the payload rather than from a second copy
+// of the constants (Requirement 7.13).
+function applyInspectorStyleTokens() {
+  const panel = inspectorPanel();
+  if (!panel || !panel.style || typeof panel.style.setProperty !== 'function') return;
+  for (const attributeState of ATTRIBUTE_STATES) {
+    const style = attributeStyleFor(attributeState);
+    const color = style ? safeColorToken(style.color) : null;
+    if (color) panel.style.setProperty('--attr-' + attributeState, color);
+  }
+}
+
+// Change_Category badge, carrying the Flag_Token the diagram applies to the same
+// resource (Requirement 5.6). Hidden for a record without a Change_Category,
+// which is every Legacy_Mode record (Requirements 10.3, 10.6).
+function renderInspectorCategory(record) {
+  const badge = document.getElementById('inspector-category');
+  if (!badge) return false;
+  clearChildren(badge);
+  const category = record && record.changeCategory ? String(record.changeCategory) : '';
+  if (!category) {
+    badge.className = 'inspector-category hidden';
+    return false;
+  }
+  const token = safeClassToken(category);
+  badge.className = 'inspector-category' + (token ? ' category-' + token : '');
+  const style = changeStyleFor(category);
+  if (style && style.flag) {
+    // The Flag_Token as text, in its own element, exactly as the diagram legend
+    // carries it
+    const flag = makeElement('span', 'inspector-category-flag', style.flag);
+    flag.setAttribute('aria-hidden', 'true');
+    badge.appendChild(flag);
+    badge.appendChild(document.createTextNode(' '));
+  }
+  badge.appendChild(document.createTextNode(changeCategoryLabel(category)));
+  return true;
+}
+
+// Attribute_State legend (Requirement 7.12), built from the index style table.
+// Shown only where a Change_Category exists, so a Legacy_Mode record shows the
+// configuration without it (Requirement 10.3).
+function renderInspectorLegend(hasCategory) {
+  const legend = document.getElementById('inspector-legend');
+  if (!legend) return 0;
+  clearChildren(legend);
+  const styles = (state.inspectorIndex && state.inspectorIndex.attributeStyles) || null;
+  if (!hasCategory || !styles) {
+    legend.classList.add('hidden');
+    return 0;
+  }
+  let items = 0;
+  for (const attributeState of ATTRIBUTE_STATES) {
+    const style = attributeStyleFor(attributeState);
+    if (!style) continue;
+    const item = makeElement('div', 'inspector-legend-item');
+    item.setAttribute('role', 'listitem');
+    const color = safeColorToken(style.color);
+    const swatch = makeElement('span', 'inspector-legend-swatch');
+    swatch.setAttribute('aria-hidden', 'true');
+    if (color) swatch.style.background = color;
+    item.appendChild(swatch);
+    item.appendChild(makeElement('span', 'inspector-legend-flag', style.flag ? String(style.flag) : ''));
+    item.appendChild(document.createTextNode(attributeStateLabel(attributeState)));
+    legend.appendChild(item);
+    items += 1;
+  }
+  legend.classList.toggle('hidden', items === 0);
+  return items;
+}
+
+function attributeValueText(value) {
+  return value === undefined || value === null ? '' : String(value);
+}
+
+// One value cell. A `changed` row labels its two values separately
+// (Requirement 7.11); every value is written as text, so `(sensitive)`,
+// `(known after apply)` and `(truncated)` arrive verbatim and a value holding
+// markup stays inert (Requirements 11.8, 13.12).
+function attributeValueCell(label, value, withLabel) {
+  const cell = makeElement('td', 'inspector-value-cell');
+  if (withLabel) {
+    const tag = makeElement('span', 'inspector-value-label', label);
+    tag.setAttribute('aria-hidden', 'true');
+    cell.appendChild(tag);
+  }
+  cell.appendChild(document.createTextNode(attributeValueText(value)));
+  return cell;
+}
+
+// The row formatter: one <tr> per Attribute_Entry, built element by element.
+// The Attribute_Flag_Token sits in a text cell of its own so the Attribute_State
+// survives a monochrome rendering (Requirement 7.10), and the colour token is
+// applied to the row (Requirements 7.6-7.9).
+function inspectorRowElement(entry) {
+  const source = entry && typeof entry === 'object' ? entry : {};
+  const attributeState = normalizeAttributeState(source.state);
+  const style = attributeStyleFor(attributeState);
+  const flag = style && style.flag ? String(style.flag) : '';
+  const color = style ? safeColorToken(style.color) : null;
+
+  const row = document.createElement('tr');
+  row.className = 'attr-' + attributeState;
+  row.setAttribute('data-state', attributeState);
+  if (color) row.style.color = color;
+
+  const flagCell = makeElement('td', 'inspector-flag-cell', flag);
+  if (flag) flagCell.setAttribute('aria-label', attributeStateLabel(attributeState));
+  row.appendChild(flagCell);
+
+  row.appendChild(makeElement('td', 'inspector-path-cell', attributeValueText(source.path)));
+
+  const before = attributeValueText(source.before);
+  const after = attributeValueText(source.after);
+  if (attributeState === 'changed') {
+    row.appendChild(attributeValueCell('Before', before, true));
+    row.appendChild(attributeValueCell('After', after, true));
+  } else if (attributeState === 'added') {
+    row.appendChild(attributeValueCell('Before', '', false));
+    row.appendChild(attributeValueCell('After', after, false));
+  } else if (attributeState === 'removed') {
+    row.appendChild(attributeValueCell('Before', before, false));
+    row.appendChild(attributeValueCell('After', '', false));
+  } else {
+    // `unchanged`: one value, spanning both value columns
+    const cell = attributeValueCell('Value', before !== '' ? before : after, false);
+    cell.setAttribute('colspan', '2');
+    row.appendChild(cell);
+  }
+  return row;
+}
+
+// Per-state counts of the rows the panel displays (Requirement 5.11).
+function renderInspectorCounts() {
+  const container = document.getElementById('inspector-counts');
+  if (!container) return {};
+  clearChildren(container);
+  const counts = {};
+  for (const attributeState of ATTRIBUTE_STATES) counts[attributeState] = 0;
+  for (const row of inspectorRowIndex) {
+    if (row.element && row.element.classList && row.element.classList.contains('hidden')) continue;
+    counts[row.state] = (counts[row.state] || 0) + 1;
+  }
+  for (const attributeState of ATTRIBUTE_STATES) {
+    if (!counts[attributeState]) continue;
+    const style = attributeStyleFor(attributeState);
+    const item = makeElement('span', 'inspector-count-item');
+    item.setAttribute('data-state', attributeState);
+    if (style && style.flag) {
+      item.appendChild(makeElement('span', 'inspector-count-flag', String(style.flag)));
+      item.appendChild(document.createTextNode(' '));
+    }
+    item.appendChild(document.createTextNode(attributeStateLabel(attributeState) + ' ' + counts[attributeState]));
+    container.appendChild(item);
+  }
+  return counts;
+}
+
+// The truncation notice: the applied Truncation_Reasons, the omitted count, and
+// the Value_Bounds the run reported (Requirements 12.9, 12.10).
+function renderInspectorTruncation(record) {
+  const notice = document.getElementById('inspector-truncation');
+  if (!notice) return '';
+  const reasons = Array.isArray(record && record.truncations)
+    ? record.truncations.map(r => String(r)).filter(Boolean)
+    : [];
+  const omitted = Number(record && record.omittedAttributes) || 0;
+  if (!reasons.length && omitted <= 0) {
+    setElementText(notice, '');
+    notice.classList.add('hidden');
+    return '';
+  }
+  const parts = [];
+  if (reasons.length) parts.push('Truncated by: ' + reasons.join(', ') + '.');
+  if (omitted > 0) {
+    parts.push(omitted === 1 ? '1 attribute omitted.' : omitted + ' attributes omitted.');
+  }
+  const bounds = (state.inspectorIndex && state.inspectorIndex.bounds) || null;
+  if (bounds) {
+    parts.push(
+      'Limits: ' +
+        (Number(bounds.maxRows) || 0) +
+        ' rows, ' +
+        (Number(bounds.maxScalarChars) || 0) +
+        ' characters, depth ' +
+        (Number(bounds.maxDepth) || 0) +
+        '.'
+    );
+  }
+  const text = parts.join(' ');
+  setElementText(notice, text);
+  notice.classList.remove('hidden');
+  return text;
+}
+
+// Filter box and changed-only toggle (Requirements 5.9, 5.10). Both hide rows
+// rather than rebuilding them, so the record is read once per activation.
+function applyInspectorFilters() {
+  const filterEl = document.getElementById('inspector-filter');
+  const changedOnlyEl = document.getElementById('chk-inspector-changed-only');
+  const needle = filterEl ? String(filterEl.value || '').trim().toLowerCase() : '';
+  const changedOnly = changedOnlyEl ? !!changedOnlyEl.checked : false;
+
+  let visible = 0;
+  for (const row of inspectorRowIndex) {
+    let show = true;
+    if (changedOnly && row.state === ATTRIBUTE_UNCHANGED) show = false;
+    if (show && needle) show = row.haystack.indexOf(needle) !== -1;
+    if (row.element && row.element.classList) row.element.classList.toggle('hidden', !show);
+    if (show) visible += 1;
+  }
+  renderInspectorCounts();
+  return visible;
+}
+
+// The configuration on screen, as text for the clipboard (Requirement 5.12).
+function inspectorConfigurationText() {
+  const lines = [];
+  const name = document.getElementById('inspector-name');
+  const type = document.getElementById('inspector-type');
+  const group = document.getElementById('inspector-resource-group');
+  const address = document.getElementById('inspector-address');
+  if (name && name.textContent) lines.push(name.textContent);
+  if (type && type.textContent) lines.push('Type: ' + type.textContent);
+  if (group && group.textContent) lines.push('Resource group: ' + group.textContent);
+  if (address && address.textContent) lines.push('Address: ' + address.textContent);
+  if (lines.length) lines.push('');
+  for (const row of inspectorRowIndex) {
+    if (row.element && row.element.classList && row.element.classList.contains('hidden')) continue;
+    lines.push(row.text);
+  }
+  return lines.join('\n');
+}
+
+async function copyInspectorConfiguration() {
+  try {
+    await copyToClipboard(inspectorConfigurationText());
+    showToast('Configuration copied to clipboard', 'success');
+  } catch (e) {
+    showToast('Failed to copy', 'error');
+  }
+}
+
+// Display one Inspector_Record: identity header, Change_Category badge, legend,
+// one row per Attribute_Entry, per-state counts, the redaction notice and the
+// truncation notice. Container records get exactly the treatment node records
+// get (Requirement 9.7).
+function renderInspectorRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const panel = inspectorPanel();
+  if (panel) panel.classList.remove('hidden');
+  resetInspectorPanelContent();
+  applyInspectorStyleTokens();
+
+  if (record.key) state.inspectorKey = String(record.key);
+
+  setInspectorText('inspector-name', record.name || record.key || '');
+  setInspectorText('inspector-type', record.resourceType || '');
+  setInspectorText('inspector-resource-group', record.resourceGroup || '');
+  const addressRow = document.getElementById('inspector-address-row');
+  if (record.address) {
+    setInspectorText('inspector-address', record.address);
+    if (addressRow) addressRow.classList.remove('hidden');
+  } else if (addressRow) {
+    addressRow.classList.add('hidden');
+  }
+
+  const hasCategory = renderInspectorCategory(record);
+  renderInspectorLegend(hasCategory);
+
+  const body = document.getElementById('inspector-rows');
+  const entries = Array.isArray(record.attributes) ? record.attributes : [];
+  inspectorRowIndex = [];
+  let redacted = false;
+  for (const entry of entries) {
+    const element = inspectorRowElement(entry);
+    const source = entry && typeof entry === 'object' ? entry : {};
+    const before = attributeValueText(source.before);
+    const after = attributeValueText(source.after);
+    if (before === REDACTION_LITERAL && after === REDACTION_LITERAL) redacted = true;
+    const path = attributeValueText(source.path);
+    const rowState = element.getAttribute('data-state') || ATTRIBUTE_UNCHANGED;
+    const style = attributeStyleFor(rowState);
+    const flag = style && style.flag ? String(style.flag) : ' ';
+    let text = flag + ' ' + path;
+    if (rowState === 'changed') text += ': ' + before + ' -> ' + after;
+    else if (rowState === 'added') text += ': ' + after;
+    else if (rowState === 'removed') text += ': ' + before;
+    else text += ': ' + (before !== '' ? before : after);
+    inspectorRowIndex.push({
+      element: element,
+      state: rowState,
+      haystack: (path + ' ' + before + ' ' + after).toLowerCase(),
+      text: text,
+    });
+    if (body) body.appendChild(element);
+  }
+
+  // Redaction removes the information the two phases would be compared on
+  // (Requirement 11.8).
+  setInspectorText('inspector-status', redacted ? INSPECTOR_REDACTED_MESSAGE : '');
+  renderInspectorTruncation(record);
+  applyInspectorFilters();
+  return record;
 }

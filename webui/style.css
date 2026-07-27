@@ -1554,6 +1554,22 @@ body {
   font-size: 0.72rem;
   white-space: nowrap;
 }
+/* Viewer body: the canvas and the Inspector_Panel share one row so the panel
+   never covers the diagram (Requirement 8.6) */
+.viewer-body {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+.viewer-section.minimized .viewer-body {
+  max-height: 0;
+  min-height: 0;
+  opacity: 0;
+  overflow: hidden;
+}
 .viewer-canvas {
   flex: 1;
   background: var(--bg-elevated);
@@ -1571,6 +1587,266 @@ body {
   max-width: 100%;
   transition: transform var(--transition-smooth);
   user-select: none;
+}
+/* ─── Interactive Resource Inspector: viewer stage ─── */
+/* One wrapper around the PNG and the Interaction_Layer SVG, so a single
+   transform keeps both aligned across the 0.1–5 zoom range (Requirement 3.9) */
+.viewer-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  transform-origin: center center;
+  transition: transform var(--transition-smooth);
+}
+.viewer-stage > svg {
+  max-width: 100%;
+  height: auto;
+  user-select: none;
+}
+.viewer-stage.layer-active > img { display: none; }
+.viewer-stage.image-active > svg { display: none; }
+/* Hit target prepended to each node group: transparent, but still clickable */
+.viewer-stage rect.ch-hit {
+  fill: transparent;
+  stroke: none;
+  cursor: pointer;
+  pointer-events: all;
+}
+.viewer-stage rect.ch-hit:focus-visible {
+  outline: none;
+  stroke: var(--accent-primary);
+  stroke-width: 3;
+  stroke-dasharray: 4 3;
+}
+/* Selection indicator: a stroke change, not colour alone (Requirement 8.7) */
+.viewer-stage .ch-selected rect.ch-hit,
+.viewer-stage .ch-selected > polygon,
+.viewer-stage .ch-selected > path,
+.viewer-stage .ch-selected > ellipse {
+  stroke: var(--accent-primary, #0078d4);
+  stroke-width: 3;
+  stroke-dasharray: 6 3;
+}
+
+/* ─── Interactive Resource Inspector: panel ─── */
+.inspector-panel {
+  --attr-added: #107C10;
+  --attr-removed: #D13438;
+  --attr-changed: #0078D4;
+  flex: 0 0 clamp(300px, 32%, 460px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.inspector-panel.hidden { display: none; }
+.inspector-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.inspector-identity { min-width: 0; }
+.inspector-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inspector-name {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+/* Change_Category badge: colour plus the diagram Flag_Token as text */
+.inspector-category {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.inspector-category.hidden { display: none; }
+.inspector-category .inspector-category-flag { font-weight: 700; }
+.inspector-category.category-create { color: var(--attr-added); }
+.inspector-category.category-delete { color: var(--attr-removed); }
+.inspector-category.category-update,
+.inspector-category.category-replace { color: var(--attr-changed); }
+.inspector-category.category-unchanged { color: var(--text-muted); }
+.inspector-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+}
+.inspector-meta-item {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.inspector-meta-item dt {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.inspector-meta-item dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.inspector-meta-address dd { font-family: var(--font-mono, monospace); }
+.inspector-close { align-self: flex-start; }
+/* Attribute_State legend (Requirement 7.12) */
+.inspector-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.72rem;
+}
+.inspector-legend.hidden { display: none; }
+.inspector-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.inspector-legend-flag {
+  display: inline-block;
+  min-width: 1.1em;
+  text-align: center;
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+}
+.inspector-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+}
+.inspector-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inspector-filter-wrapper { flex: 1; min-width: 0; }
+.inspector-filter-wrapper .form-input { font-size: 0.78rem; }
+.inspector-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.inspector-toggle .toggle-slider { width: 34px; height: 18px; }
+.inspector-toggle .toggle-slider::after { width: 12px; height: 12px; }
+.inspector-toggle .toggle-input:checked + .toggle-slider::after { transform: translateX(16px); }
+.inspector-toggle .toggle-label { font-size: 0.75rem; }
+.inspector-counts,
+.inspector-status {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.inspector-counts:empty,
+.inspector-status:empty { display: none; }
+.inspector-count-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+}
+.inspector-count-item .inspector-count-flag {
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+}
+/* Scrollable attribute table */
+.inspector-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.inspector-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  font-family: var(--font-mono, monospace);
+}
+.inspector-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 5px 6px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+.inspector-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: top;
+  word-break: break-all;
+}
+.inspector-table tr.hidden { display: none; }
+.inspector-col-flag { width: 2.4em; }
+.inspector-col-path { width: 38%; }
+/* The Flag_Token lives in its own text cell, so the Attribute_State survives a
+   monochrome rendering and does not rely on colour (WCAG 2.1 SC 1.4.1) */
+.inspector-flag-cell {
+  width: 2.4em;
+  text-align: center;
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Attribute_State colour tokens, paired with the flag cell above */
+.inspector-table tr.attr-added,
+.inspector-table tr.attr-added td { color: var(--attr-added); }
+.inspector-table tr.attr-removed,
+.inspector-table tr.attr-removed td { color: var(--attr-removed); }
+.inspector-table tr.attr-changed,
+.inspector-table tr.attr-changed td { color: var(--attr-changed); }
+.inspector-table tr.attr-unchanged,
+.inspector-table tr.attr-unchanged td { color: var(--text-primary); }
+.inspector-value-label {
+  display: block;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.inspector-truncation {
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 185, 0, .16);
+  color: var(--accent-yellow, #ffb900);
+  font-size: 0.72rem;
+}
+.inspector-truncation.hidden { display: none; }
+@media (max-width: 900px) {
+  .viewer-body { flex-direction: column; }
+  .inspector-panel { flex: 0 0 auto; max-height: 45vh; }
 }
 
 /* Fullscreen viewer (browser API — kept as fallback) */
@@ -1622,6 +1898,26 @@ body {
   border-radius: var(--radius-sm);
 }
 .app-container.viewer-fullscreen .viewer-canvas img {
+  max-width: none;
+  max-height: none;
+}
+/* Fullscreen: the row wrapper takes the height the canvas used to take on its own,
+   so the Inspector_Panel sits beside a full-height diagram instead of clipping it */
+.viewer-section:fullscreen .viewer-body,
+.app-container.viewer-fullscreen .viewer-body {
+  min-height: 0;
+  height: 100%;
+}
+.viewer-section:fullscreen .viewer-canvas,
+.app-container.viewer-fullscreen .viewer-canvas {
+  height: auto;
+}
+.viewer-section:fullscreen .viewer-stage,
+.app-container.viewer-fullscreen .viewer-stage {
+  max-width: none;
+}
+.viewer-section:fullscreen .viewer-stage > svg,
+.app-container.viewer-fullscreen .viewer-stage > svg {
   max-width: none;
   max-height: none;
 }
