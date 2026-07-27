@@ -421,8 +421,8 @@ def test_property_16_inspector_failures_never_cost_the_diagram(site, categories,
 # Inspector_Mode on as it does with Inspector_Mode off. Two runs over the same
 # input are compared, both exporting, one with the Inspector on.
 #
-# Why this needs the real binaries, and why the assertion is not a byte compare
-# -----------------------------------------------------------------------------
+# Why this needs the real binaries, and how far the byte compare reaches
+# ----------------------------------------------------------------------
 # The `.dot` file the export feeds to the converter is `dot.source` *after*
 # `unflatten`, which pretty-prints one attribute per line. The rest of the suite
 # stubs `Digraph.unflatten` and `subprocess.run`, so a comparison made through
@@ -434,17 +434,33 @@ def test_property_16_inspector_failures_never_cost_the_diagram(site, categories,
 # Azure-facing lookups the local-template path cannot make and the platform
 # auto-open command at the end of a run.
 #
-# `graphviz2drawio.convert` is not deterministic: converting one unchanged `.dot`
-# file twice in the same process yields Draw.io XML that differs in the order the
-# container cells are numbered and in the layout offsets that follow from it
-# (measured while writing this test: 63,223 against 63,212 bytes for the same
-# input). A byte compare of the two `.drawio` files therefore tests the converter's
-# reproducibility, not CloudHorus's behaviour, and would fail for reasons
-# Inspector_Mode has nothing to do with. What is asserted instead is everything
-# CloudHorus controls:
+# `graphviz2drawio.convert` is not reproducible, for two separate reasons, and only
+# one of them has been removed.
 #
-# * the converter *input* — the `.dot` bytes the run writes — is byte-identical
-#   with Inspector_Mode on and off, and is the unflattened form production feeds;
+# The one that is gone was the layout. The converter re-laid the graph out through
+# pygraphviz, and that path is unstable: the same `.dot` text put one subnet
+# container at x=2276, 1828, 2047 and 2495 across four calls, and the containers
+# swapped sides. `apply_authoritative_geometry` now reads the layout from
+# `dot -Tdot` and writes it onto the cells after conversion, so every box is a
+# function of the DOT alone — and the DOT is byte-identical with Inspector_Mode on
+# and off. Geometry is therefore comparable exactly, and is compared exactly.
+#
+# The one that remains is the serialisation. The converter still numbers the
+# `clustN` and `nodeN` cells in an order that varies between conversions of one
+# unchanged file, and the attribute escaping varies with it: two exports of the same
+# input first diverge at byte 490, an `&` against a `"`, with byte-identical DOT on
+# both sides. A whole-file byte compare therefore still measures the converter
+# rather than CloudHorus, and would fail for reasons Inspector_Mode has nothing to
+# do with. (One pair of runs did come out byte-identical while this was being
+# investigated, which is what the numbering order makes possible, and is exactly why
+# a single measurement is not evidence of stability here.)
+#
+# So the criterion is discharged on every axis that is decidable:
+#
+# * the converter *input* — the `.dot` bytes the run writes — is byte-identical,
+#   and is the unflattened form production feeds;
+# * every cell's *geometry* is identical, keyed by label rather than by the
+#   unstable cell id;
 # * the export *structure* — the cell inventory, and per resource the shape, the
 #   embedded icon, the full style and the container it sits in — is identical;
 # * no value the plan marks sensitive appears in either export.
@@ -691,6 +707,54 @@ def test_inspector_mode_leaves_the_draw_io_converter_input_byte_identical(drawio
         INSPECTOR_INDEX_SUFFIX,
     }
     assert suffixes(disabled) - suffixes(enabled) == set()
+
+
+@requires_real_export
+def test_the_draw_io_geometry_is_identical_with_inspector_mode_on_and_off(drawio_parity) -> None:
+    """Requirement 1.8 on the axis that is now decidable: every cell box is equal.
+
+    Geometry used to be the part of the export that moved for reasons unrelated to
+    Inspector_Mode, because the converter re-laid the graph out through pygraphviz
+    and that path is not reproducible. `apply_authoritative_geometry` now writes the
+    `dot -Tdot` layout onto the cells, so the boxes are a function of the DOT alone
+    — and the DOT is byte-identical either way, which the test above asserts.
+
+    Cells are compared by their own id, and the geometry is keyed by the cell's
+    label rather than by that id, because the converter still numbers the `clustN`
+    and `nodeN` cells in an order that varies between conversions of one unchanged
+    file. That remaining instability is what keeps a whole-file byte compare out of
+    reach; see the module comment.
+    """
+    disabled, enabled, _markers = drawio_parity
+
+    def boxes(export: _Export) -> Dict[str, Tuple[str, str, str, str]]:
+        root = ET.fromstring(export.read_text(".drawio"))
+        found: Dict[str, Tuple[str, str, str, str]] = {}
+        for cell in root.iter("mxCell"):
+            geometry = cell.find("mxGeometry")
+            if geometry is None:
+                continue
+            label = re.sub(r"<[^>]*>", " ", cell.get("value") or "").strip()
+            if not label:
+                continue
+            found[" ".join(label.split())] = (
+                geometry.get("x", ""),
+                geometry.get("y", ""),
+                geometry.get("width", ""),
+                geometry.get("height", ""),
+            )
+        return found
+
+    disabled_boxes = boxes(disabled)
+    enabled_boxes = boxes(enabled)
+
+    # Control: real cells are being compared, and the boxes carry real coordinates.
+    assert len(disabled_boxes) >= 5, f"only {len(disabled_boxes)} labelled cells found"
+    assert any(box[2] and box[3] for box in disabled_boxes.values())
+
+    assert set(enabled_boxes) == set(disabled_boxes)
+    for label, box in sorted(disabled_boxes.items()):
+        assert enabled_boxes[label] == box, f"Inspector_Mode moved or resized {label!r}"
 
 
 @requires_real_export
