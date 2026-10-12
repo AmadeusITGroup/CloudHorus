@@ -12,9 +12,13 @@ from azure.core.pipeline.policies import RetryPolicy
 # Azure SDK imports
 from azure.identity import ClientSecretCredential, DefaultAzureCredential, DeviceCodeCredential
 from azure.mgmt.network import NetworkManagementClient
-from azure.mgmt.resource import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ExportTemplateRequest, ResourceGroup
 from azure.mgmt.subscription import SubscriptionClient
+
+try:
+    from azure.mgmt.resource import ResourceManagementClient
+except ImportError:  # azure-mgmt-resource >= 26 moved the client
+    from azure.mgmt.resource.resources import ResourceManagementClient
 
 from core.readonly_policy import ReadOnlyPolicy
 from utils.logger import SingletonLogger

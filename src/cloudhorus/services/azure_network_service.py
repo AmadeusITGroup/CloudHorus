@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional, cast
 from azure.core.exceptions import ClientAuthenticationError, ResourceNotFoundError
 from azure.core.pipeline.policies import RetryPolicy
 from azure.mgmt.network import NetworkManagementClient
-from azure.mgmt.resource import ResourceManagementClient
+
+try:
+    from azure.mgmt.resource import ResourceManagementClient
+except ImportError:  # azure-mgmt-resource >= 26 moved the client
+    from azure.mgmt.resource.resources import ResourceManagementClient
 
 from cloudhorus.services.base import BaseService
 

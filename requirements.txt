@@ -11,7 +11,7 @@ pywebview>=5.0
 
 # Azure SDK — needed for Live Mode (scanning real subscriptions)
 azure-identity>=1.15.0
-azure-mgmt-resource>=23.0.0
+azure-mgmt-resource>=23.0.0,<26
 azure-mgmt-network>=23.0.0
 azure-mgmt-subscription>=3.0.0
 azure-core>=1.28.0

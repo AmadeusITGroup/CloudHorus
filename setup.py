@@ -39,7 +39,7 @@ INSTALL_REQUIRES = [
 # Azure SDK dependencies for direct Azure API access
 AZURE_REQUIRES = [
     "azure-identity>=1.15.0",
-    "azure-mgmt-resource>=23.0.0",
+    "azure-mgmt-resource>=23.0.0,<26",
     "azure-mgmt-network>=23.0.0",
     "azure-mgmt-subscription>=3.0.0",
     "azure-core>=1.28.0",
