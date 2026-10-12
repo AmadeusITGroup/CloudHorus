@@ -30,6 +30,10 @@ cloudhorus-env/
 .idea/
 .vscode/
 .qodo/
+.cursor/
+.copilot/
+.aider*
+.claude/
 *.swp
 *.swo
 *~
@@ -83,8 +87,8 @@ test-data/
 /_*.sh
 /_*.log
 
-# Kiro local tool state (generated specId, not source)
-.kiro/specs/**/.config.kiro
+# Kiro / AI assistant local state (keep local, never push)
+.kiro/
 
 # Pytest cache
 .pytest_cache/
